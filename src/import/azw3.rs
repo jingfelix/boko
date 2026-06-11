@@ -119,6 +119,10 @@ impl Importer for Azw3Importer {
         &self.metadata
     }
 
+    fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.metadata
+    }
+
     fn toc(&self) -> &[TocEntry] {
         &self.toc
     }

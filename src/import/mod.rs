@@ -49,6 +49,10 @@ pub trait Importer: Send + Sync {
     /// Book metadata (title, authors, etc.).
     fn metadata(&self) -> &Metadata;
 
+    /// Mutable access to book metadata, for editing before export
+    /// (e.g. changing the author or cover reference).
+    fn metadata_mut(&mut self) -> &mut Metadata;
+
     /// Table of contents.
     fn toc(&self) -> &[TocEntry];
 
@@ -494,6 +498,10 @@ mod tests {
                 &self.metadata
             }
 
+            fn metadata_mut(&mut self) -> &mut Metadata {
+                &mut self.metadata
+            }
+
             fn toc(&self) -> &[TocEntry] {
                 &self.toc
             }
@@ -608,6 +616,10 @@ mod tests {
 
             fn metadata(&self) -> &Metadata {
                 &self.metadata
+            }
+
+            fn metadata_mut(&mut self) -> &mut Metadata {
+                &mut self.metadata
             }
 
             fn toc(&self) -> &[TocEntry] {

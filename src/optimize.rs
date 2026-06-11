@@ -219,6 +219,10 @@ impl Importer for OptimizedImporter {
         &self.metadata
     }
 
+    fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.metadata
+    }
+
     fn toc(&self) -> &[TocEntry] {
         self.inner.toc()
     }
@@ -308,6 +312,10 @@ impl Importer for EmptyBackend {
 
     fn metadata(&self) -> &Metadata {
         &self.0
+    }
+
+    fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.0
     }
 
     fn toc(&self) -> &[TocEntry] {

@@ -126,6 +126,11 @@ impl Book {
         self.backend.metadata()
     }
 
+    /// Mutable access to book metadata for edits applied before export.
+    pub fn metadata_mut(&mut self) -> &mut Metadata {
+        self.backend.metadata_mut()
+    }
+
     /// Table of contents.
     ///
     /// Serves the most-resolved view available: after `resolve_links` the
