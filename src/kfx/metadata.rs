@@ -53,7 +53,8 @@ pub enum MetadataSource {
 pub enum MetadataField {
     Title,
     Language,
-    FirstAuthor,
+    /// All authors — emitted as one repeated `author` entry each (KFX allows it).
+    AllAuthors,
     Description,
     Publisher,
     Identifier,
@@ -98,7 +99,7 @@ impl MetadataField {
                     Some(&meta.language)
                 }
             }
-            MetadataField::FirstAuthor => meta.authors.first().map(|s| s.as_str()),
+            MetadataField::AllAuthors => meta.authors.first().map(|s| s.as_str()),
             MetadataField::Description => meta.description.as_deref(),
             MetadataField::Publisher => meta.publisher.as_deref(),
             MetadataField::Identifier => {
@@ -150,7 +151,7 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
         MetadataRule {
             key: "author",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Dynamic(MetadataField::FirstAuthor),
+            source: MetadataSource::Dynamic(MetadataField::AllAuthors),
         },
         MetadataRule {
             key: "description",
@@ -339,6 +340,17 @@ pub fn build_category_entries(
     let mut entries = Vec::new();
 
     for rule in schema.iter().filter(|r| r.category == category) {
+        // KFX allows repeated `author` keys, so emit one entry per author
+        // (round-trips: the importer pushes each `author` into the list).
+        if matches!(
+            rule.source,
+            MetadataSource::Dynamic(MetadataField::AllAuthors)
+        ) {
+            for author in meta.authors.iter().filter(|a| !a.is_empty()) {
+                entries.push((rule.key, author.clone()));
+            }
+            continue;
+        }
         let value = match &rule.source {
             MetadataSource::Static(s) => Some(s.to_string()),
             MetadataSource::Dynamic(field) => {
@@ -408,10 +420,7 @@ mod tests {
         };
 
         assert_eq!(MetadataField::Title.extract(&meta), Some("Test Book"));
-        assert_eq!(
-            MetadataField::FirstAuthor.extract(&meta),
-            Some("Author One")
-        );
+        assert_eq!(MetadataField::AllAuthors.extract(&meta), Some("Author One"));
         assert_eq!(MetadataField::Language.extract(&meta), Some("en"));
         assert_eq!(
             MetadataField::Description.extract(&meta),
@@ -441,6 +450,30 @@ mod tests {
         assert!(entries.iter().any(|(k, v)| *k == "language" && v == "en"));
         assert!(entries.iter().any(|(k, v)| *k == "author" && v == "Author"));
         assert!(!entries.iter().any(|(k, _)| *k == "description"));
+    }
+
+    #[test]
+    fn test_multiple_authors_emit_multiple_entries() {
+        let meta = Metadata {
+            title: "Test Book".to_string(),
+            authors: vec![
+                "Author One".to_string(),
+                "Author Two".to_string(),
+                "Author Three".to_string(),
+            ],
+            language: "en".to_string(),
+            ..Default::default()
+        };
+
+        let ctx = MetadataContext::default();
+        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+
+        let authors: Vec<_> = entries
+            .iter()
+            .filter(|(k, _)| *k == "author")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(authors, vec!["Author One", "Author Two", "Author Three"]);
     }
 
     #[test]
