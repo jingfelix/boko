@@ -24,7 +24,12 @@ cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:ion-rs", "optimize-images
 # Image shrinking for `Book::optimize` (recompress/transcode raster images).
 # Optional so the wasm build stays small; included in the CLI by default.
 optimize-images = ["dep:image"]
-wasm = ["wasm-bindgen", "console_error_panic_hook"]
+wasm = [
+    "wasm-bindgen",
+    "console_error_panic_hook",
+    "dep:serde",
+    "dep:serde_json",
+]
 # Parallel chapter compilation via rayon. Native-only: the dependency is
 # declared under the non-wasm target table below, so enabling this feature on
 # wasm32 is a no-op (the code falls back to serial iteration).
