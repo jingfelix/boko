@@ -6,7 +6,7 @@ use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 use crate::Book;
-use crate::model::{CollectionInfo, Contributor, Format, TocEntry};
+use crate::model::{CollectionInfo, Contributor, Format, Metadata, TocEntry};
 
 #[derive(Debug)]
 enum OptionalPatch<T> {
@@ -74,6 +74,76 @@ struct CollectionPatch {
     #[serde(alias = "collectionType")]
     collection_type: Option<String>,
     position: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MetadataView {
+    title: String,
+    authors: Vec<String>,
+    language: String,
+    identifier: String,
+    publisher: Option<String>,
+    description: Option<String>,
+    subjects: Vec<String>,
+    date: Option<String>,
+    rights: Option<String>,
+    cover_image: Option<String>,
+    modified_date: Option<String>,
+    contributors: Vec<ContributorView>,
+    title_sort: Option<String>,
+    author_sort: Option<String>,
+    collection: Option<CollectionView>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ContributorView {
+    name: String,
+    file_as: Option<String>,
+    role: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CollectionView {
+    name: String,
+    collection_type: Option<String>,
+    position: Option<f64>,
+}
+
+impl From<&Metadata> for MetadataView {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            title: metadata.title.clone(),
+            authors: metadata.authors.clone(),
+            language: metadata.language.clone(),
+            identifier: metadata.identifier.clone(),
+            publisher: metadata.publisher.clone(),
+            description: metadata.description.clone(),
+            subjects: metadata.subjects.clone(),
+            date: metadata.date.clone(),
+            rights: metadata.rights.clone(),
+            cover_image: metadata.cover_image.clone(),
+            modified_date: metadata.modified_date.clone(),
+            contributors: metadata
+                .contributors
+                .iter()
+                .map(|contributor| ContributorView {
+                    name: contributor.name.clone(),
+                    file_as: contributor.file_as.clone(),
+                    role: contributor.role.clone(),
+                })
+                .collect(),
+            title_sort: metadata.title_sort.clone(),
+            author_sort: metadata.author_sort.clone(),
+            collection: metadata
+                .collection
+                .as_ref()
+                .map(|collection| CollectionView {
+                    name: collection.name.clone(),
+                    collection_type: collection.collection_type.clone(),
+                    position: collection.position,
+                }),
+        }
+    }
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
@@ -192,6 +262,16 @@ fn parse_format(name: &str) -> Result<Format, JsValue> {
 
 fn js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+/// Read book metadata as a JSON object.
+///
+/// `format` accepts "epub", "azw3", "mobi", "azw", or "kfx".
+#[wasm_bindgen]
+pub fn read_metadata_json(data: &[u8], format: &str) -> Result<String, JsValue> {
+    let book = Book::from_bytes(data, parse_format(format)?).map_err(js_error)?;
+    let view = MetadataView::from(book.metadata());
+    serde_json::to_string(&view).map_err(js_error)
 }
 
 /// Convert an ebook from one format to another.
@@ -535,5 +615,19 @@ mod tests {
 
         assert!(book.metadata().publisher.is_none());
         assert!(book.metadata().collection.is_none());
+    }
+
+    #[test]
+    fn read_metadata_json_returns_book_metadata() {
+        let epub = include_bytes!("../tests/fixtures/epictetus.epub");
+        let metadata = read_metadata_json(epub, "epub").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+
+        assert!(
+            parsed["title"]
+                .as_str()
+                .is_some_and(|title| !title.is_empty())
+        );
+        assert!(parsed["authors"].as_array().is_some());
     }
 }
