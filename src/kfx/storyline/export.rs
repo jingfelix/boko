@@ -80,6 +80,72 @@ fn link_color_for(chapter: &Chapter, node_id: NodeId) -> Option<u32> {
     scan(chapter, node_id, 0)
 }
 
+/// Per-column widths (percent) for a table's `column_format`.
+///
+/// Kindle Previewer computes these with its layout engine; without a layout
+/// pass, text volume per column is a serviceable stand-in. Reference output
+/// sums to ~90% (leaving slack), so widths are scaled to 90 with an 8% floor
+/// for narrow label columns. Returns empty (omit column_format) for tables
+/// with fewer than two columns. Spanning cells are skipped — their text
+/// doesn't belong to any single column.
+fn table_column_widths(chapter: &Chapter, table_id: NodeId) -> Vec<f64> {
+    fn subtree_text_chars(chapter: &Chapter, id: NodeId) -> usize {
+        let mut n = 0;
+        if let Some(node) = chapter.node(id)
+            && !node.text.is_empty()
+        {
+            n += chapter.text(node.text).chars().count();
+        }
+        for child in chapter.children(id) {
+            n += subtree_text_chars(chapter, child);
+        }
+        n
+    }
+    fn visit_row(chapter: &Chapter, row_id: NodeId, totals: &mut Vec<usize>) {
+        let mut col = 0usize;
+        for cell in chapter.children(row_id) {
+            if chapter.node(cell).map(|n| n.role) != Some(Role::TableCell) {
+                continue;
+            }
+            let span = chapter.semantics.col_span(cell).unwrap_or(1).max(1) as usize;
+            if span == 1 {
+                if totals.len() <= col {
+                    totals.resize(col + 1, 0);
+                }
+                totals[col] += subtree_text_chars(chapter, cell);
+            }
+            col += span;
+        }
+    }
+
+    let mut totals: Vec<usize> = Vec::new();
+    for child in chapter.children(table_id) {
+        match chapter.node(child).map(|n| n.role) {
+            Some(Role::TableRow) => visit_row(chapter, child, &mut totals),
+            Some(Role::TableHead | Role::TableBody) => {
+                for row in chapter.children(child) {
+                    if chapter.node(row).map(|n| n.role) == Some(Role::TableRow) {
+                        visit_row(chapter, row, &mut totals);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if totals.len() < 2 {
+        return Vec::new();
+    }
+    let sum: usize = totals.iter().sum();
+    if sum == 0 {
+        return vec![90.0 / totals.len() as f64; totals.len()];
+    }
+    totals
+        .iter()
+        .map(|&t| (90.0 * t as f64 / sum as f64).max(8.0))
+        .collect()
+}
+
 /// Convert an IR chapter to a TokenStream.
 ///
 /// This is the first stage of export: walking the IR tree and emitting tokens.
@@ -217,6 +283,25 @@ pub(super) fn walk_node_for_export(
     if node.role == Role::Table {
         // Drives the yj_table / yj_table_viewer content features ($585).
         ctx.has_tables = true;
+        // Reference table elements carry column widths and border collapsing
+        // baked in; the device's table renderer needs column_format to lay
+        // cells out side by side.
+        elem.table_format = Some(Box::new(crate::kfx::tokens::TableFormat {
+            column_widths_pct: table_column_widths(chapter, node_id),
+            border_collapse: chapter
+                .styles
+                .get(node.style)
+                .is_some_and(|s| s.border_collapse == crate::style::BorderCollapse::Collapse),
+        }));
+    }
+
+    // A <caption> directly inside a table carries yj.classification: caption
+    // like reference output (figcaptions don't).
+    if node.role == Role::Caption {
+        elem.is_table_caption = node
+            .parent
+            .and_then(|p| chapter.node(p))
+            .is_some_and(|p| p.role == Role::Table);
     }
 
     // Register the node's style and get a KFX style symbol
@@ -229,24 +314,32 @@ pub(super) fn walk_node_for_export(
         .styles
         .get(node.style)
         .is_some_and(|s| s.dropcap_chars > 0);
-    // Lists shed their authored horizontal indent: the Kindle renderer adds
-    // its own gutter for list elements, so keeping margin/padding-left would
-    // double the indent (Kindle Previewer strips them too).
-    let strip_list_indent = matches!(node.role, Role::UnorderedList | Role::OrderedList);
-    let style_symbol =
-        if hint.is_some() || !adj.is_identity() || link_color.is_some() || strip_list_indent {
-            ctx.register_style_id_adjusted(
-                node.style,
-                parent_style,
-                &chapter.styles,
-                adj,
-                hint,
-                link_color,
-                strip_list_indent,
-            )
-        } else {
-            ctx.register_style_id(node.style, parent_style, &chapter.styles)
-        };
+    // Role-driven property strips: lists shed their authored horizontal
+    // indent (the renderer's native gutter replaces it), table cells shed
+    // authored min/max-width (column_format carries the column widths).
+    // Kindle Previewer does both.
+    let strip = match node.role {
+        Role::UnorderedList | Role::OrderedList => crate::kfx::context::RoleStrip::ListIndent,
+        Role::TableCell => crate::kfx::context::RoleStrip::CellWidth,
+        _ => crate::kfx::context::RoleStrip::None,
+    };
+    let style_symbol = if hint.is_some()
+        || !adj.is_identity()
+        || link_color.is_some()
+        || strip != crate::kfx::context::RoleStrip::None
+    {
+        ctx.register_style_id_adjusted(
+            node.style,
+            parent_style,
+            &chapter.styles,
+            adj,
+            hint,
+            link_color,
+            strip,
+        )
+    } else {
+        ctx.register_style_id(node.style, parent_style, &chapter.styles)
+    };
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render
@@ -352,7 +445,18 @@ pub(super) fn walk_node_for_export(
         elem.set_semantic(SemanticTarget::EpubType, epub_type.to_string());
     }
 
-    let run_style_symbol = elem.style_symbol;
+    // Run wrappers normally reuse the block's style; inside table cells and
+    // table captions they use the default style instead — the cell/caption
+    // element already carries the box style (borders, padding), and copying
+    // it onto the inner $269 would render the borders twice. Reference
+    // output gives these inner text elements their own minimal styles.
+    let is_table_caption = elem.is_table_caption;
+    let run_style_symbol = if node.role == Role::TableCell || is_table_caption {
+        ctx.default_style_used = true;
+        Some(ctx.default_style_symbol)
+    } else {
+        elem.style_symbol
+    };
     stream.push(KfxToken::StartElement(elem));
 
     // Arm dropcap suppression for this block's first inline run.
@@ -385,7 +489,16 @@ pub(super) fn walk_node_for_export(
         .iter()
         .any(|&c| chapter.node(c).is_some_and(|n| !is_inline_flow(n.role)));
 
-    if !(has_flow && has_elements) {
+    // Table cells are $270 containers; a container must never carry a text
+    // ref directly (a bare-text <th>/<td> would otherwise put one there), so
+    // any inline flow in a cell is forced into a $269 run child — the shape
+    // reference cells always have. Table captions get the same treatment:
+    // reference captions nest their content in an inner text element, and
+    // the caption element itself (marked yj.classification: caption) must
+    // not carry a content ref or style_events.
+    let force_runs = (node.role == Role::TableCell || is_table_caption) && has_flow;
+
+    if !(has_flow && has_elements) && !force_runs {
         // Uniform content: emit text and children directly (single-ref or
         // pure-children element).
         if !node.text.is_empty() {

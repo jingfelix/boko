@@ -107,10 +107,27 @@ pub struct ElementStart {
     /// KFX requires block elements with borders to be `type: container` with
     /// nested `type: text` for content. Set during export by checking IR style.
     pub needs_container_wrapper: bool,
-    /// Whether this table cell is a header cell (`<th>`). Emitted as the
-    /// `table_header_cell` semantic-type marker so the header/data distinction
-    /// survives KFX export.
+    /// Whether this table cell is a header cell (`<th>`). Set on import from
+    /// legacy marker cells or the enclosing header section; on export the
+    /// distinction is carried structurally (cells inside `type: header`).
     pub is_header_cell: bool,
+    /// Table-level formatting for `type: table` elements, computed during
+    /// export (reference output bakes column widths and border collapsing
+    /// into the table element; the device's table renderer lays out columns
+    /// from `column_format`).
+    pub table_format: Option<Box<TableFormat>>,
+    /// Whether this is a `<caption>` directly inside a table — carries
+    /// `yj.classification: caption` like reference output.
+    pub is_table_caption: bool,
+}
+
+/// Table-element formatting attributes emitted on `type: table` ($278).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TableFormat {
+    /// Per-column widths as percentages (empty = omit column_format).
+    pub column_widths_pct: Vec<f64>,
+    /// The table's CSS `border-collapse: collapse`.
+    pub border_collapse: bool,
 }
 
 impl ElementStart {
@@ -128,6 +145,8 @@ impl ElementStart {
             style_name: None,
             needs_container_wrapper: false,
             is_header_cell: false,
+            table_format: None,
+            is_table_caption: false,
         }
     }
 
@@ -241,6 +260,8 @@ impl TokenStream {
             style_name: None,
             needs_container_wrapper: false,
             is_header_cell: false,
+            table_format: None,
+            is_table_caption: false,
         }));
     }
 

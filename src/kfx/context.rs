@@ -216,6 +216,21 @@ impl Default for ResourceRegistry {
     }
 }
 
+/// Role-driven property strip applied when converting an IR style for a
+/// specific element role (see [`ExportContext::register_style_id_adjusted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RoleStrip {
+    /// No role-specific stripping.
+    #[default]
+    None,
+    /// Lists shed authored margin/padding-left (the renderer's native gutter
+    /// replaces them).
+    ListIndent,
+    /// Table cells shed authored min/max-width (column_format carries the
+    /// column widths).
+    CellWidth,
+}
+
 /// Maximum bytes of text per $145 content fragment.
 ///
 /// Amazon's tooling rolls to a new content fragment once the accumulated
@@ -712,7 +727,7 @@ pub struct ExportContext {
 
     /// Memo for `register_style_id_adjusted` (same lifecycle): the key adds
     /// the margin-collapse override bits, layout hint, link color, and
-    /// list-indent-strip flag to the (style, parent) pair.
+    /// role-based property strip to the (style, parent) pair.
     #[allow(clippy::type_complexity)]
     ir_adjusted_style_memo: FxHashMap<
         (
@@ -722,7 +737,7 @@ pub struct ExportContext {
             Option<u32>,
             Option<crate::kfx::symbols::KfxSymbol>,
             Option<u32>,
-            bool,
+            RoleStrip,
         ),
         u64,
     >,
@@ -1151,12 +1166,12 @@ impl ExportContext {
         adjust: crate::kfx::storyline::MarginAdjust,
         layout_hint: Option<crate::kfx::symbols::KfxSymbol>,
         link_color: Option<u32>,
-        strip_list_indent: bool,
+        strip: RoleStrip,
     ) -> u64 {
         if adjust.is_identity()
             && layout_hint.is_none()
             && link_color.is_none()
-            && !strip_list_indent
+            && strip == RoleStrip::None
         {
             return self.register_style_id(style_id, parent_id, style_pool);
         }
@@ -1167,7 +1182,7 @@ impl ExportContext {
             adjust.bottom_abs_em.map(f32::to_bits),
             layout_hint,
             link_color,
-            strip_list_indent,
+            strip,
         );
         if let Some(&symbol) = self.ir_adjusted_style_memo.get(&key) {
             return symbol;
@@ -1206,15 +1221,27 @@ impl ExportContext {
         apply(KfxSymbol::MarginTop, adjust.top_abs_em);
         apply(KfxSymbol::MarginBottom, adjust.bottom_abs_em);
 
-        // Lists: drop authored horizontal indent. The Kindle renderer
-        // supplies the list gutter natively (with list_style_position:
-        // outside on the element); Kindle Previewer strips margin-left and
-        // padding-left from ul/ol styles entirely — in HTML renderers the
-        // authored values *replace* the UA default gutter, but on Kindle
-        // they would stack on top of the native one, doubling the indent.
-        if strip_list_indent {
-            kfx_style.remove(KfxSymbol::MarginLeft);
-            kfx_style.remove(KfxSymbol::PaddingLeft);
+        match strip {
+            RoleStrip::None => {}
+            // Lists: drop authored horizontal indent. The Kindle renderer
+            // supplies the list gutter natively (with list_style_position:
+            // outside on the element); Kindle Previewer strips margin-left
+            // and padding-left from ul/ol styles entirely — in HTML
+            // renderers the authored values *replace* the UA default gutter,
+            // but on Kindle they would stack on top of the native one,
+            // doubling the indent.
+            RoleStrip::ListIndent => {
+                kfx_style.remove(KfxSymbol::MarginLeft);
+                kfx_style.remove(KfxSymbol::PaddingLeft);
+            }
+            // Table cells: drop authored min/max-width — column widths live
+            // in the table's column_format, and reference cell styles carry
+            // no width constraints (authored min-widths fight the table
+            // renderer's column layout).
+            RoleStrip::CellWidth => {
+                kfx_style.remove(KfxSymbol::MinWidth);
+                kfx_style.remove(KfxSymbol::MaxWidth);
+            }
         }
 
         if let Some(hint) = layout_hint {

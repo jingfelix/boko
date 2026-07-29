@@ -255,6 +255,8 @@ pub(super) fn tokenize_content_item(
         style_name,                     // Style name (for import lookup)
         needs_container_wrapper: false, // Only used during export
         is_header_cell,
+        table_format: None,      // Only used during export
+        is_table_caption: false, // Only used during export
     }));
 
     // Recurse into children
@@ -442,8 +444,22 @@ where
             KfxToken::StartElement(elem) => {
                 let parent = *stack.last().unwrap_or(&chapter.root());
 
+                // KFX has no cell element type: reference output encodes
+                // cells as containers directly inside a table_row, so
+                // restore the TableCell role structurally. (Legacy boko
+                // output used $269 cells with yj.semantics.type markers;
+                // those arrive here already typed TableCell.)
+                let mut role = elem.role;
+                if role == Role::Container
+                    && chapter
+                        .node(parent)
+                        .is_some_and(|p| p.role == Role::TableRow)
+                {
+                    role = Role::TableCell;
+                }
+
                 // Create the node
-                let node = Node::new(elem.role);
+                let node = Node::new(role);
                 let node_id = chapter.alloc_node(node);
                 chapter.append_child(parent, node_id);
 
@@ -462,8 +478,15 @@ where
                 // Apply ALL semantic attributes from the generic map
                 apply_semantics_to_node(&mut chapter, node_id, &elem.semantics);
 
-                // Restore the header-cell flag.
-                if elem.is_header_cell {
+                // Restore the header-cell flag: carried explicitly by legacy
+                // marker cells, or inferred from the enclosing header
+                // section for reference-shaped (container) cells.
+                if elem.is_header_cell
+                    || (role == Role::TableCell
+                        && stack
+                            .iter()
+                            .any(|&a| chapter.node(a).is_some_and(|n| n.role == Role::TableHead)))
+                {
                     chapter.semantics.set_header_cell(node_id, true);
                 }
 

@@ -326,16 +326,13 @@ fn build_math_kvg_container(math: &MathKvgToken, ctx: &mut ExportContext) -> Ion
 }
 
 /// The `yj.semantics.type` marker value for an element, if its export
-/// strategy carries one. A header cell overrides the strategy's "table_cell"
-/// with "table_header_cell" so the th/td distinction survives the round trip.
+/// strategy carries one. (Table cells carry no marker — they're $270
+/// containers, where kfxlib rejects yj.semantics.* keys; import restores
+/// cell roles structurally instead.)
 fn semantic_type_for(elem: &ElementStart) -> Option<&'static str> {
-    if elem.is_header_cell {
-        Some("table_header_cell")
-    } else {
-        schema()
-            .export_strategy(elem.role)
-            .and_then(|s| s.semantic_type())
-    }
+    schema()
+        .export_strategy(elem.role)
+        .and_then(|s| s.semantic_type())
 }
 
 /// Build the Ion field list for a `StartElement` token.
@@ -426,6 +423,75 @@ fn start_element_fields(
     // Add list_style for ordered lists
     if elem.role == Role::OrderedList {
         fields.push((sym!(ListStyle), IonValue::Symbol(sym!(Numeric))));
+    }
+
+    // Table cells are containers and need layout: vertical like all $270
+    // elements (reference cells carry it; the table renderer expects cell
+    // children of a table_row to be laid-out containers).
+    if elem.role == Role::TableCell && !container_wrapper {
+        fields.push((sym!(Layout), IonValue::Symbol(KfxSymbol::Vertical as u64)));
+    }
+
+    // Reference table elements carry the viewer feature set and the
+    // formatting Kindle Previewer bakes in: pan/zoom + scale-to-fit in the
+    // double-tap viewer, regional selection, CSS border collapsing, and
+    // per-column widths (the renderer lays out columns from column_format).
+    if let Some(tf) = &elem.table_format {
+        fields.push((
+            sym!(YjTableFeatures),
+            IonValue::List(vec![
+                IonValue::Symbol(sym!(PanZoom)),
+                IonValue::Symbol(sym!(ScaleFit)),
+            ]),
+        ));
+        fields.push((
+            sym!(YjTableSelectionMode),
+            IonValue::Symbol(sym!(YjRegional)),
+        ));
+        if tf.border_collapse {
+            fields.push((sym!(TableBorderCollapse), IonValue::Bool(true)));
+        }
+        if !tf.column_widths_pct.is_empty() {
+            let columns = tf
+                .column_widths_pct
+                .iter()
+                .map(|w| {
+                    IonValue::Struct(vec![(
+                        sym!(Width),
+                        IonValue::Struct(vec![
+                            (sym!(Value), IonValue::Decimal(format!("{w:.4}"))),
+                            (sym!(Unit), IonValue::Symbol(sym!(Percent))),
+                        ]),
+                    )])
+                })
+                .collect();
+            fields.push((sym!(ColumnFormat), IonValue::List(columns)));
+        }
+        if tf.border_collapse {
+            for spacing in [
+                KfxSymbol::BorderSpacingVertical,
+                KfxSymbol::BorderSpacingHorizontal,
+            ] {
+                fields.push((
+                    spacing as u64,
+                    IonValue::Struct(vec![
+                        (sym!(Value), IonValue::Decimal("0".to_string())),
+                        (sym!(Unit), IonValue::Symbol(sym!(Pt))),
+                    ]),
+                ));
+            }
+        }
+    }
+
+    // Table captions carry yj.classification: caption like reference output.
+    // The caption's content lives in a nested run child (see force_runs in
+    // export.rs) — a classification-marked element with its own content ref
+    // and style_events trips kfxlib's caption offset accounting.
+    if elem.is_table_caption {
+        fields.push((
+            sym!(YjClassification),
+            IonValue::Symbol(KfxSymbol::Caption as u64),
+        ));
     }
 
     // Lists carry list_style_position: outside like reference output — the

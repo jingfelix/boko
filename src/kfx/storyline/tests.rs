@@ -36,6 +36,8 @@ fn test_build_ir_with_image() {
         style_name: None,
         needs_container_wrapper: false,
         is_header_cell: false,
+        table_format: None,
+        is_table_caption: false,
     }));
     stream.end_element();
 
@@ -67,6 +69,8 @@ fn test_build_ir_with_text_content() {
         style_name: None,
         needs_container_wrapper: false,
         is_header_cell: false,
+        table_format: None,
+        is_table_caption: false,
     }));
     stream.end_element();
 
@@ -103,6 +107,8 @@ fn test_build_ir_with_heading() {
         style_name: None,
         needs_container_wrapper: false,
         is_header_cell: false,
+        table_format: None,
+        is_table_caption: false,
     }));
     stream.end_element();
 
@@ -142,6 +148,8 @@ fn test_build_ir_with_link_span() {
         style_name: None,
         needs_container_wrapper: false,
         is_header_cell: false,
+        table_format: None,
+        is_table_caption: false,
     }));
     stream.end_element();
 
@@ -792,6 +800,8 @@ fn test_nested_spans_link_containing_inline() {
         style_name: None,
         needs_container_wrapper: false,
         is_header_cell: false,
+        table_format: None,
+        is_table_caption: false,
     }));
     stream.end_element();
 
@@ -1228,6 +1238,204 @@ mod content_model {
         assert!(
             matches!(field(para_ion, KfxSymbol::Type), Some(IonValue::Symbol(t)) if *t == text_type)
         );
+    }
+
+    /// Tables export in the reference shape the device's table renderer
+    /// engages with: cells are `container` + `layout: vertical` with NO
+    /// `yj.semantics.type` marker (kfxlib rejects local markers on $270),
+    /// cell text nests in a run child with the default style (reusing the
+    /// cell's box style would draw its borders twice), cell styles shed
+    /// authored min/max-width (column_format carries the widths), the table
+    /// element carries the viewer features + column_format, and the caption
+    /// nests its content with `yj.classification: caption` on the wrapper.
+    /// Import restores TableCell structurally, header flag from the header
+    /// section.
+    #[test]
+    fn table_exports_reference_shape() {
+        use crate::style::{BorderCollapse, ComputedStyle as IrStyle, Length};
+
+        let mut chapter = Chapter::new();
+
+        let mut table_style = IrStyle::default();
+        table_style.border_collapse = BorderCollapse::Collapse;
+        let mut table = Node::new(Role::Table);
+        table.style = chapter.styles.intern(table_style);
+        let table_id = chapter.alloc_node(table);
+        chapter.append_child(chapter.root(), table_id);
+
+        let caption_id = chapter.alloc_node(Node::new(Role::Caption));
+        chapter.append_child(table_id, caption_id);
+        text_child(&mut chapter, caption_id, "Table 1. Comparison");
+
+        let mut cell_style = IrStyle::default();
+        cell_style.min_width = Length::Rem(6.0);
+        cell_style.padding_left = Length::Em(0.5);
+        let cell_style_id = chapter.styles.intern(cell_style);
+        let cell = |chapter: &mut Chapter, row: NodeId, text: &str| {
+            let mut node = Node::new(Role::TableCell);
+            node.style = cell_style_id;
+            let id = chapter.alloc_node(node);
+            chapter.append_child(row, id);
+            text_child(chapter, id, text);
+        };
+
+        let head_id = chapter.alloc_node(Node::new(Role::TableHead));
+        chapter.append_child(table_id, head_id);
+        let hrow_id = chapter.alloc_node(Node::new(Role::TableRow));
+        chapter.append_child(head_id, hrow_id);
+        cell(&mut chapter, hrow_id, "Name");
+        cell(&mut chapter, hrow_id, "Value");
+
+        let body_id = chapter.alloc_node(Node::new(Role::TableBody));
+        chapter.append_child(table_id, body_id);
+        let brow_id = chapter.alloc_node(Node::new(Role::TableRow));
+        chapter.append_child(body_id, brow_id);
+        cell(&mut chapter, brow_id, "A");
+        cell(&mut chapter, brow_id, "a much longer cell text value");
+
+        let (ion, ctx) = export(&chapter);
+        let IonValue::List(elems) = &ion else {
+            panic!()
+        };
+        let table_ion = as_struct(&elems[0]);
+
+        // Table element: viewer features, selection mode, border collapsing,
+        // and per-column widths (wider text column gets the wider column).
+        assert!(
+            field(table_ion, KfxSymbol::YjTableFeatures).is_some(),
+            "table carries yj.table_features"
+        );
+        assert!(
+            field(table_ion, KfxSymbol::YjTableSelectionMode).is_some(),
+            "table carries yj.table_selection_mode"
+        );
+        assert!(
+            matches!(
+                field(table_ion, KfxSymbol::TableBorderCollapse),
+                Some(IonValue::Bool(true))
+            ),
+            "border-collapse: collapse reaches the table element"
+        );
+        let Some(IonValue::List(columns)) = field(table_ion, KfxSymbol::ColumnFormat) else {
+            panic!("table must carry column_format");
+        };
+        assert_eq!(columns.len(), 2, "one column_format entry per column");
+        let width_of = |col: &IonValue| -> f64 {
+            let Some(IonValue::Struct(w)) = field(as_struct(col), KfxSymbol::Width) else {
+                panic!("column entry must carry a width");
+            };
+            let Some(IonValue::Decimal(v)) = w
+                .iter()
+                .find(|(k, _)| *k == KfxSymbol::Value as u64)
+                .map(|(_, v)| v)
+            else {
+                panic!("width must be a decimal value");
+            };
+            v.parse().unwrap()
+        };
+        assert!(
+            width_of(&columns[1]) > width_of(&columns[0]),
+            "longer column text gets the wider column"
+        );
+
+        let IonValue::List(kids) = field(table_ion, KfxSymbol::ContentList).expect("children")
+        else {
+            panic!()
+        };
+
+        // Caption: classification on the wrapper, content in a nested child.
+        let caption = as_struct(&kids[0]);
+        assert!(
+            matches!(
+                field(caption, KfxSymbol::YjClassification),
+                Some(IonValue::Symbol(c)) if *c == KfxSymbol::Caption as u64
+            ),
+            "caption wrapper carries yj.classification: caption"
+        );
+        assert!(
+            field(caption, KfxSymbol::Content).is_none(),
+            "classification-marked caption must not carry a content ref"
+        );
+
+        // Header cell: container + layout: vertical, no local-symbol fields
+        // (no yj.semantics.type marker), content nested in a run child that
+        // does NOT reuse the cell's box style.
+        let header = as_struct(&kids[1]);
+        let IonValue::List(hrows) = field(header, KfxSymbol::ContentList).expect("rows") else {
+            panic!()
+        };
+        let hrow = as_struct(&hrows[0]);
+        let IonValue::List(cells) = field(hrow, KfxSymbol::ContentList).expect("cells") else {
+            panic!()
+        };
+        let cell_ion = as_struct(&cells[0]);
+        assert!(
+            matches!(
+                field(cell_ion, KfxSymbol::Type),
+                Some(IonValue::Symbol(t)) if *t == KfxSymbol::Container as u64
+            ),
+            "cells are containers"
+        );
+        assert!(
+            field(cell_ion, KfxSymbol::Layout).is_some(),
+            "cells carry layout: vertical"
+        );
+        assert!(
+            !cell_ion
+                .iter()
+                .any(|(k, _)| *k >= crate::kfx::context::SymbolTable::LOCAL_MIN_ID),
+            "cells carry no local-symbol fields (yj.semantics.type marker)"
+        );
+        let cell_style_sym = match field(cell_ion, KfxSymbol::Style) {
+            Some(IonValue::Symbol(s)) => *s,
+            other => panic!("cell must carry a style symbol, got {other:?}"),
+        };
+        let IonValue::List(cell_kids) =
+            field(cell_ion, KfxSymbol::ContentList).expect("cell child")
+        else {
+            panic!()
+        };
+        let run = as_struct(&cell_kids[0]);
+        assert!(
+            field(run, KfxSymbol::Content).is_some(),
+            "cell text lives in a nested run child"
+        );
+        let run_style_sym = match field(run, KfxSymbol::Style) {
+            Some(IonValue::Symbol(s)) => *s,
+            other => panic!("run must carry a style symbol, got {other:?}"),
+        };
+        assert_ne!(
+            run_style_sym, cell_style_sym,
+            "run child must not reuse the cell's box style"
+        );
+
+        // Cell styles shed authored min/max-width.
+        let cell_kfx = ctx
+            .style_registry
+            .style_by_symbol(cell_style_sym)
+            .expect("cell style registered");
+        assert!(
+            cell_kfx.get(KfxSymbol::MinWidth).is_none(),
+            "cell min-width stripped (column_format carries widths)"
+        );
+
+        // Structural import round-trip: cells come back as TableCell, header
+        // cells flagged from the enclosing header section.
+        let storyline = IonValue::Struct(vec![(KfxSymbol::ContentList as u64, ion.clone())]);
+        let tokens = tokenize_storyline(&storyline, &[], None, None);
+        let imported = build_ir_from_tokens(&tokens, &[], None, |_, _| Some(String::new()));
+        let mut cell_roles = 0;
+        let mut header_cells = 0;
+        for nid in imported.iter_dfs() {
+            if imported.node(nid).map(|n| n.role) == Some(Role::TableCell) {
+                cell_roles += 1;
+                if imported.semantics.is_header_cell(nid) {
+                    header_cells += 1;
+                }
+            }
+        }
+        assert_eq!(cell_roles, 4, "all four cells import as TableCell");
+        assert_eq!(header_cells, 2, "thead cells import with the header flag");
     }
 
     /// Lists shed their authored horizontal indent (margin/padding-left) at
