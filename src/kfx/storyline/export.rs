@@ -229,18 +229,24 @@ pub(super) fn walk_node_for_export(
         .styles
         .get(node.style)
         .is_some_and(|s| s.dropcap_chars > 0);
-    let style_symbol = if hint.is_some() || !adj.is_identity() || link_color.is_some() {
-        ctx.register_style_id_adjusted(
-            node.style,
-            parent_style,
-            &chapter.styles,
-            adj,
-            hint,
-            link_color,
-        )
-    } else {
-        ctx.register_style_id(node.style, parent_style, &chapter.styles)
-    };
+    // Lists shed their authored horizontal indent: the Kindle renderer adds
+    // its own gutter for list elements, so keeping margin/padding-left would
+    // double the indent (Kindle Previewer strips them too).
+    let strip_list_indent = matches!(node.role, Role::UnorderedList | Role::OrderedList);
+    let style_symbol =
+        if hint.is_some() || !adj.is_identity() || link_color.is_some() || strip_list_indent {
+            ctx.register_style_id_adjusted(
+                node.style,
+                parent_style,
+                &chapter.styles,
+                adj,
+                hint,
+                link_color,
+                strip_list_indent,
+            )
+        } else {
+            ctx.register_style_id(node.style, parent_style, &chapter.styles)
+        };
     elem.style_symbol = Some(style_symbol);
 
     // Check if this element needs container wrapping for borders to render

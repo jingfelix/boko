@@ -711,7 +711,8 @@ pub struct ExportContext {
     ir_inline_style_memo: FxHashMap<(StyleId, StyleId), u64>,
 
     /// Memo for `register_style_id_adjusted` (same lifecycle): the key adds
-    /// the margin-collapse override bits to the (style, parent) pair.
+    /// the margin-collapse override bits, layout hint, link color, and
+    /// list-indent-strip flag to the (style, parent) pair.
     #[allow(clippy::type_complexity)]
     ir_adjusted_style_memo: FxHashMap<
         (
@@ -721,6 +722,7 @@ pub struct ExportContext {
             Option<u32>,
             Option<crate::kfx::symbols::KfxSymbol>,
             Option<u32>,
+            bool,
         ),
         u64,
     >,
@@ -1140,6 +1142,7 @@ impl ExportContext {
     /// values (in lh of the element's line box) or removed when collapsed
     /// to zero. Memoized by (style, parent, override bits) — collapsed
     /// sequences repeat, so identical adjusted styles dedup.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_style_id_adjusted(
         &mut self,
         style_id: StyleId,
@@ -1148,8 +1151,13 @@ impl ExportContext {
         adjust: crate::kfx::storyline::MarginAdjust,
         layout_hint: Option<crate::kfx::symbols::KfxSymbol>,
         link_color: Option<u32>,
+        strip_list_indent: bool,
     ) -> u64 {
-        if adjust.is_identity() && layout_hint.is_none() && link_color.is_none() {
+        if adjust.is_identity()
+            && layout_hint.is_none()
+            && link_color.is_none()
+            && !strip_list_indent
+        {
             return self.register_style_id(style_id, parent_id, style_pool);
         }
         let key = (
@@ -1159,6 +1167,7 @@ impl ExportContext {
             adjust.bottom_abs_em.map(f32::to_bits),
             layout_hint,
             link_color,
+            strip_list_indent,
         );
         if let Some(&symbol) = self.ir_adjusted_style_memo.get(&key) {
             return symbol;
@@ -1196,6 +1205,17 @@ impl ExportContext {
         };
         apply(KfxSymbol::MarginTop, adjust.top_abs_em);
         apply(KfxSymbol::MarginBottom, adjust.bottom_abs_em);
+
+        // Lists: drop authored horizontal indent. The Kindle renderer
+        // supplies the list gutter natively (with list_style_position:
+        // outside on the element); Kindle Previewer strips margin-left and
+        // padding-left from ul/ol styles entirely — in HTML renderers the
+        // authored values *replace* the UA default gutter, but on Kindle
+        // they would stack on top of the native one, doubling the indent.
+        if strip_list_indent {
+            kfx_style.remove(KfxSymbol::MarginLeft);
+            kfx_style.remove(KfxSymbol::PaddingLeft);
+        }
 
         if let Some(hint) = layout_hint {
             kfx_style.set(

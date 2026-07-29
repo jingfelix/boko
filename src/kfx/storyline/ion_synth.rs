@@ -428,6 +428,13 @@ fn start_element_fields(
         fields.push((sym!(ListStyle), IonValue::Symbol(sym!(Numeric))));
     }
 
+    // Lists carry list_style_position: outside like reference output — the
+    // renderer's native gutter (which replaces the stripped authored
+    // margin/padding-left; see register_style_id_adjusted) holds the marker.
+    if matches!(elem.role, Role::UnorderedList | Role::OrderedList) {
+        fields.push((sym!(ListStylePosition), IonValue::Symbol(sym!(Outside))));
+    }
+
     // (layout_hints ride the element's *style*, not the content node —
     // reference KFX puts treat_as_title/figure/caption in style structs;
     // see layout_hint_for in export.rs.)

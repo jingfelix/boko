@@ -286,6 +286,16 @@ impl StyleRegistry {
             .flatten()
             .map(|(id, _, style)| (id, style))
     }
+
+    /// Look up a registered style by its name symbol (the symbol elements
+    /// reference in their `style` field).
+    pub fn style_by_symbol(&self, name_symbol: u64) -> Option<&ComputedStyle> {
+        self.styles
+            .values()
+            .flatten()
+            .find(|(_, sym, _)| *sym == name_symbol)
+            .map(|(_, _, style)| style)
+    }
 }
 
 impl Default for StyleRegistry {

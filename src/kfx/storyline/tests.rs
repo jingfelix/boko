@@ -1229,4 +1229,96 @@ mod content_model {
             matches!(field(para_ion, KfxSymbol::Type), Some(IonValue::Symbol(t)) if *t == text_type)
         );
     }
+
+    /// Lists shed their authored horizontal indent (margin/padding-left) at
+    /// export: the Kindle renderer supplies the list gutter natively, so
+    /// authored values — which *replace* the UA gutter in HTML renderers —
+    /// would stack on top of it and roughly double the indent on device.
+    /// Kindle Previewer strips them the same way. Vertical margins survive,
+    /// non-list elements keep their indent, and the list element carries
+    /// `list_style_position: outside`.
+    #[test]
+    fn list_sheds_horizontal_indent() {
+        use crate::style::{ComputedStyle as IrStyle, Length};
+
+        let mut chapter = Chapter::new();
+
+        // Leading paragraph so the list's top margin can't be dropped by
+        // chapter-start margin collapsing.
+        let lead = chapter.alloc_node(Node::new(Role::Paragraph));
+        chapter.append_child(chapter.root(), lead);
+        text_child(&mut chapter, lead, "lead");
+
+        // ul { margin: 15px 0 15px 1.25em; padding-left: 2.25em }
+        let mut ul_style = IrStyle::default();
+        ul_style.margin_top = Length::Px(15.0);
+        ul_style.margin_left = Length::Em(1.25);
+        ul_style.padding_left = Length::Em(2.25);
+        let mut ul = Node::new(Role::UnorderedList);
+        ul.style = chapter.styles.intern(ul_style);
+        let ul_id = chapter.alloc_node(ul);
+        chapter.append_child(chapter.root(), ul_id);
+
+        let li_id = chapter.alloc_node(Node::new(Role::ListItem));
+        chapter.append_child(ul_id, li_id);
+        text_child(&mut chapter, li_id, "item");
+
+        // Control: a paragraph with the same indent keeps it.
+        let mut p_style = IrStyle::default();
+        p_style.margin_left = Length::Em(1.25);
+        p_style.padding_left = Length::Em(2.25);
+        let mut para = Node::new(Role::Paragraph);
+        para.style = chapter.styles.intern(p_style);
+        let p_id = chapter.alloc_node(para);
+        chapter.append_child(chapter.root(), p_id);
+        text_child(&mut chapter, p_id, "para");
+
+        let (ion, ctx) = export(&chapter);
+        let IonValue::List(elems) = ion else { panic!() };
+
+        let style_of = |elem: &[(u64, IonValue)]| {
+            let Some(IonValue::Symbol(sym)) = field(elem, KfxSymbol::Style) else {
+                panic!("element must carry a style symbol");
+            };
+            ctx.style_registry
+                .style_by_symbol(*sym)
+                .expect("style symbol must resolve in the registry")
+        };
+
+        let ul_ion = as_struct(&elems[1]);
+        assert!(
+            matches!(field(ul_ion, KfxSymbol::Type), Some(IonValue::Symbol(t)) if *t == KfxSymbol::List as u64)
+        );
+        assert!(
+            matches!(
+                field(ul_ion, KfxSymbol::ListStylePosition),
+                Some(IonValue::Symbol(p)) if *p == KfxSymbol::Outside as u64
+            ),
+            "list carries list_style_position: outside"
+        );
+
+        let ul_kfx = style_of(ul_ion);
+        assert!(
+            ul_kfx.get(KfxSymbol::MarginLeft).is_none(),
+            "list margin-left must be stripped"
+        );
+        assert!(
+            ul_kfx.get(KfxSymbol::PaddingLeft).is_none(),
+            "list padding-left must be stripped"
+        );
+        assert!(
+            ul_kfx.get(KfxSymbol::MarginTop).is_some(),
+            "list vertical margin must survive"
+        );
+
+        let p_kfx = style_of(as_struct(&elems[2]));
+        assert!(
+            p_kfx.get(KfxSymbol::MarginLeft).is_some(),
+            "non-list elements keep margin-left"
+        );
+        assert!(
+            p_kfx.get(KfxSymbol::PaddingLeft).is_some(),
+            "non-list elements keep padding-left"
+        );
+    }
 }
