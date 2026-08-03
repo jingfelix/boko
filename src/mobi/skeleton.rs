@@ -196,7 +196,6 @@ pub struct ChunkerResult {
 
 /// Chunker - breaks HTML files into skeletons and chunks
 pub struct Chunker {
-    aid_counter: u32,
     /// Mapping of (file, id) -> aid built during processing
     id_map: HashMap<(String, String), String>,
     /// Mapping of file_href -> [(original_position, aid)] for filepos resolution
@@ -206,7 +205,6 @@ pub struct Chunker {
 impl Chunker {
     pub fn new() -> Self {
         Self {
-            aid_counter: 0,
             id_map: HashMap::new(),
             filepos_map: HashMap::new(),
         }
@@ -296,13 +294,18 @@ impl Chunker {
             let offset = search_pos + rel_pos;
             let val_start = offset + 6; // len(" aid=\"") is 6
 
-            // Validate we have enough bytes for 4-char ID + quote
-            if val_start + 5 <= text.len() {
-                // Extract 4-byte aid
-                let aid_bytes = &text[val_start..val_start + 4];
-                let quote = text[val_start + 4];
-
-                if quote == b'"' {
+            if val_start < text.len()
+                && let Some(val_len) = memchr::memchr(b'"', &text[val_start..])
+            {
+                let aid_bytes = &text[val_start..val_start + val_len];
+                // Calibre emits variable-width base32 AIDs. Accept only the
+                // same ASCII identifier alphabet so a malformed attribute
+                // cannot consume arbitrary markup up to a later quote.
+                if !aid_bytes.is_empty()
+                    && aid_bytes
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+                {
                     let aid = String::from_utf8_lossy(aid_bytes).to_string();
 
                     // `offset` is in reassembled coordinates. Find the chunk
@@ -369,10 +372,14 @@ impl Chunker {
         // (`xmlns:epub`, `epub:type`, `epub:prefix`, `xml:lang`, etc.) so
         // strip them before aid annotation.
         let cleaned = super::writer_transform::strip_xml_namespaces(html);
+        // Match calibre/KindleGen's spine-scoped AID namespaces instead of
+        // merely assigning one continuous sequence across the whole book.
+        // Their million-wide ranges begin `0`, `UGI0`, `1T140`, ... .
+        let mut aid_counter = file_number * 1_000_000;
         let result = super::writer_transform::add_aid_attributes_fast(
             &cleaned,
             file_href,
-            &mut self.aid_counter,
+            &mut aid_counter,
             &mut self.id_map,
         );
 
@@ -401,7 +408,7 @@ impl Chunker {
         // renderer uses chunk selectors to map a chunk's content back to
         // its enclosing DOM element; without per-file uniqueness it
         // conflates positions across files when laying out and locks up.
-        let body_aid = extract_body_aid(skel_prefix).unwrap_or_else(|| "0000".to_string());
+        let body_aid = extract_body_aid(skel_prefix).unwrap_or_else(|| "0".to_string());
         let selector = format!("P-//*[@aid='{body_aid}']");
 
         // Each chunk's `insert_pos` is the absolute rawML position where its
@@ -629,16 +636,13 @@ mod tests {
     fn test_add_aids() {
         use crate::mobi::writer_transform::add_aid_attributes_fast;
         let mut chunker = Chunker::new();
+        let mut aid_counter = 0usize;
         let html = b"<html><body><p>Hello</p><div>World</div></body></html>";
-        let result = add_aid_attributes_fast(
-            html,
-            "test.xhtml",
-            &mut chunker.aid_counter,
-            &mut chunker.id_map,
-        );
+        let result =
+            add_aid_attributes_fast(html, "test.xhtml", &mut aid_counter, &mut chunker.id_map);
         let result_str = String::from_utf8_lossy(&result.html);
-        assert!(result_str.contains("aid=\"0000\""));
-        assert!(result_str.contains("aid=\"0001\""));
+        assert!(result_str.contains("aid=\"0\""));
+        assert!(result_str.contains("aid=\"1\""));
     }
 }
 
@@ -783,5 +787,24 @@ mod chunker_tests {
              got {:?}",
             all_selectors,
         );
+
+        assert_eq!(
+            result.chunk_table[0].selector, "P-//*[@aid='0']",
+            "the first spine document must use calibre's unpadded AID base",
+        );
+        let file_one = result
+            .chunk_table
+            .iter()
+            .find(|c| c.file_number == 1)
+            .unwrap();
+        assert_eq!(file_one.selector, "P-//*[@aid='UGI0']");
+        let file_two = result
+            .chunk_table
+            .iter()
+            .find(|c| c.file_number == 2)
+            .unwrap();
+        assert_eq!(file_two.selector, "P-//*[@aid='1T140']");
+        assert!(result.aid_offset_map.contains_key("UGI0"));
+        assert!(result.aid_offset_map.contains_key("1T140"));
     }
 }
