@@ -18,7 +18,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::dom::{Origin, Stylesheet};
-use crate::model::{AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, TocEntry};
+use crate::model::{
+    AnchorTarget, Chapter, FontFace, GlobalNodeId, Landmark, Metadata, NodeId, TocEntry,
+};
 
 // `ChapterId` is a pure identifier defined in the data model; re-exported
 // here for backwards compatibility (`crate::import::ChapterId`).
@@ -254,7 +256,11 @@ pub fn resolve_path_based_href(
     if let Some(fragment) = href.strip_prefix('#') {
         let key = format!("{}#{}", from_path, fragment);
         if let Some(target) = anchor(&key) {
-            return Some(AnchorTarget::Internal(target));
+            return Some(if target.node == NodeId::ROOT {
+                AnchorTarget::Chapter(target.chapter)
+            } else {
+                AnchorTarget::Internal(target)
+            });
         }
         return None;
     }
@@ -273,7 +279,11 @@ pub fn resolve_path_based_href(
     if let Some(frag) = fragment {
         let key = format!("{}#{}", path, frag);
         if let Some(target) = anchor(&key) {
-            return Some(AnchorTarget::Internal(target));
+            return Some(if target.node == NodeId::ROOT {
+                AnchorTarget::Chapter(target.chapter)
+            } else {
+                AnchorTarget::Internal(target)
+            });
         }
         return None;
     }
@@ -432,6 +442,22 @@ mod tests {
 
         let result = resolve_relative_path("OEBPS/text/chapter.xhtml", "#anchor");
         assert_eq!(result, "OEBPS/text/chapter.xhtml#anchor");
+    }
+
+    #[test]
+    fn test_root_anchor_resolves_to_chapter_start() {
+        let chapter_id = ChapterId(2);
+        let target = resolve_path_based_href(
+            "text/chapter.xhtml",
+            "#body-id",
+            |_| Some(chapter_id),
+            |key| {
+                (key == "text/chapter.xhtml#body-id")
+                    .then_some(GlobalNodeId::new(chapter_id, NodeId::ROOT))
+            },
+        );
+
+        assert_eq!(target, Some(AnchorTarget::Chapter(chapter_id)));
     }
 
     #[test]

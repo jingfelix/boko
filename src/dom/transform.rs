@@ -282,6 +282,19 @@ impl<'a> TransformContext<'a> {
             body_style.language = Some(lang);
         }
 
+        // The body element itself is flattened into the IR root below. Preserve
+        // its ID so EPUB TOC entries such as `chapter.xhtml#chapter-start` can
+        // still resolve to the start of the chapter.
+        if let Some(node) = self.dom.get(body)
+            && let ArenaNodeData::Element { attrs, .. } = &node.data
+            && let Some(id) = attrs
+                .iter()
+                .find(|attr| attr.name.local.as_ref() == "id")
+                .map(|attr| attr.value.as_ref())
+        {
+            self.chapter.semantics.set_id(NodeId::ROOT, id);
+        }
+
         // Process body's children as children of IR root, inheriting body's
         // style. Body becomes an ancestor of everything the DFS styles, so
         // push it onto the filter first (a no-op when body is the document
@@ -659,6 +672,18 @@ mod tests {
             }
         }
         assert!(found_text);
+    }
+
+    #[test]
+    fn test_body_id_is_preserved_on_root() {
+        let dom =
+            parse_html(r#"<html><body id="chapter-start"><h1>Chapter One</h1></body></html>"#);
+        let ua = user_agent_stylesheet();
+        let stylesheets = vec![(&ua, Origin::UserAgent)];
+
+        let chapter = transform(&dom, &stylesheets);
+
+        assert_eq!(chapter.semantics.id(NodeId::ROOT), Some("chapter-start"));
     }
 
     #[test]

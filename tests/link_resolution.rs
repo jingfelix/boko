@@ -2,10 +2,32 @@
 
 use boko::Book;
 use sha1_smol::Sha1;
+use std::io::{Cursor, Write};
 use std::path::Path;
+use zip::CompressionMethod;
+use zip::write::SimpleFileOptions;
 
 fn sha1_hex(bytes: &[u8]) -> String {
     Sha1::from(bytes).hexdigest()
+}
+
+fn epub_with_body_toc_anchor() -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    zip.start_file("mimetype", stored).unwrap();
+    zip.write_all(b"application/epub+zip").unwrap();
+    zip.start_file("META-INF/container.xml", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+    zip.start_file("content.opf", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Body Anchor</dc:title><dc:language>en</dc:language><dc:identifier id="id">body-anchor</dc:identifier></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine toc="ncx"><itemref idref="chapter"/></spine></package>"#).unwrap();
+    zip.start_file("toc.ncx", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="body-anchor"/></head><docTitle><text>Body Anchor</text></docTitle><navMap><navPoint id="chapter" playOrder="1"><navLabel><text>Chapter</text></navLabel><content src="chapter.xhtml#chapter-start"/></navPoint></navMap></ncx>"#).unwrap();
+    zip.start_file("chapter.xhtml", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body id="chapter-start"><h1>Chapter</h1><p>Text</p></body></html>"#).unwrap();
+
+    zip.finish().unwrap().into_inner()
 }
 #[test]
 fn test_azw3_toc_resolution() {
@@ -100,6 +122,21 @@ fn test_epub_toc_resolution() {
     let _ = book.resolve_links().expect("Should resolve links");
 
     assert_unique_toc_hrefs(book.toc(), "EPUB");
+}
+
+#[test]
+fn test_epub_body_id_toc_resolves_to_chapter_start() {
+    let epub = epub_with_body_toc_anchor();
+    let mut book = Book::from_bytes(&epub, boko::Format::Epub).expect("open EPUB");
+
+    book.resolve_links().expect("resolve links");
+
+    assert_eq!(
+        book.toc()[0].target,
+        Some(boko::model::AnchorTarget::Chapter(boko::import::ChapterId(
+            0
+        )))
+    );
 }
 
 #[test]
