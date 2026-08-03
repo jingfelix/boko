@@ -7,7 +7,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod kfx_dump;
 use serde::Serialize;
 
-use boko::{Book, Chapter, ChapterId, Format, NodeId, Role, ToCss, TocEntry, extract_section_tree};
+use boko::{
+    Book, Chapter, ChapterId, Exporter, Format, KfxConfig, KfxContentType, KfxExporter, NodeId,
+    Role, ToCss, TocEntry, extract_section_tree,
+};
 
 #[derive(Parser)]
 #[command(name = "boko")]
@@ -54,6 +57,10 @@ enum Command {
         /// Suppress output messages
         #[arg(short, long)]
         quiet: bool,
+
+        /// Classify KFX output as a personal document (PDOC) instead of a book (EBOK)
+        #[arg(long)]
+        kfx_personal_document: bool,
     },
 
     /// Dump KFX/KDF/Ion files for debugging (KFX containers and raw Ion binary)
@@ -119,6 +126,7 @@ fn main() -> ExitCode {
             to_format,
             optimize,
             quiet,
+            kfx_personal_document,
         } => convert(
             &input,
             output.as_deref(),
@@ -126,6 +134,7 @@ fn main() -> ExitCode {
             to_format,
             optimize,
             quiet,
+            kfx_personal_document,
         ),
         Command::Dump {
             file,
@@ -505,6 +514,7 @@ fn convert(
     to_format: Option<FormatArg>,
     optimize: bool,
     quiet: bool,
+    kfx_personal_document: bool,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -549,6 +559,9 @@ fn convert(
 
     if output_format == Format::Mobi {
         return Err("MOBI output is not supported; use .azw3 instead".to_string());
+    }
+    if kfx_personal_document && output_format != Format::Kfx {
+        return Err("--kfx-personal-document requires KFX output".to_string());
     }
 
     // Check if writing to stdout
@@ -601,7 +614,7 @@ fn convert(
         // Write to stdout
         let mut stdout = std::io::stdout();
         let mut cursor = std::io::Cursor::new(Vec::new());
-        book.export(output_format, &mut cursor)
+        export_book(&book, output_format, &mut cursor, kfx_personal_document)
             .map_err(|e| format!("Conversion failed: {e}"))?;
         use std::io::Write;
         stdout
@@ -614,7 +627,7 @@ fn convert(
         // Buffer the writer: the EPUB ZipWriter issues many small writes, each
         // of which would otherwise be a syscall.
         let mut writer = std::io::BufWriter::with_capacity(64 << 10, file);
-        book.export(output_format, &mut writer)
+        export_book(&book, output_format, &mut writer, kfx_personal_document)
             .map_err(|e| format!("Conversion failed: {e}"))?;
         std::io::Write::flush(&mut writer).map_err(|e| format!("Write failed: {e}"))?;
     }
@@ -624,6 +637,26 @@ fn convert(
     }
 
     Ok(())
+}
+
+fn export_book<W: std::io::Write + std::io::Seek>(
+    book: &Book,
+    format: Format,
+    writer: &mut W,
+    kfx_personal_document: bool,
+) -> boko::Result<()> {
+    if format == Format::Kfx {
+        let content_type = if kfx_personal_document {
+            KfxContentType::PersonalDocument
+        } else {
+            KfxContentType::Ebook
+        };
+        KfxExporter::new()
+            .with_config(KfxConfig { content_type })
+            .export(book, writer)
+    } else {
+        book.export(format, writer)
+    }
 }
 
 // ----------------------------------------------------------------------------

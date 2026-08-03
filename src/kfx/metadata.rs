@@ -66,6 +66,8 @@ pub enum MetadataField {
     BookId,
     /// Sideload content ID/ASIN - from context, not Metadata.
     ContentId,
+    /// Kindle library classification (EBOK or PDOC), from export config.
+    ContentType,
     /// dcterms:modified timestamp
     ModifiedDate,
     /// First contributor with role="trl" (translator)
@@ -126,6 +128,7 @@ impl MetadataField {
             MetadataField::AssetId
             | MetadataField::BookId
             | MetadataField::ContentId
+            | MetadataField::ContentType
             | MetadataField::SeriesPosition => None,
         }
     }
@@ -199,11 +202,11 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
             category: MetadataCategory::KindleTitle,
             source: MetadataSource::Dynamic(MetadataField::ContentId),
         },
-        // EBOK (not PDOC) so sideloads shelve as Books rather than Documents.
+        // EBOK shelves as a book; PDOC uses Kindle's personal-document path.
         MetadataRule {
             key: "cde_content_type",
             category: MetadataCategory::KindleTitle,
-            source: MetadataSource::Static("EBOK"),
+            source: MetadataSource::Dynamic(MetadataField::ContentType),
         },
         // Extended metadata for better round-trip fidelity
         MetadataRule {
@@ -258,6 +261,27 @@ pub fn metadata_schema() -> Vec<MetadataRule> {
 
 use crate::util::truncate_to_date;
 
+/// How a sideloaded KFX is classified by Kindle devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KfxContentType {
+    /// Kindle book (`EBOK`). Keeps the item on the Books shelf, but USB
+    /// sideloading generally needs a separately transferred cover thumbnail.
+    #[default]
+    Ebook,
+    /// Personal document (`PDOC`). More reliable for sideloaded cover display,
+    /// at the cost of appearing under Documents and losing some book features.
+    PersonalDocument,
+}
+
+impl KfxContentType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ebook => "EBOK",
+            Self::PersonalDocument => "PDOC",
+        }
+    }
+}
+
 /// Context for metadata entry building.
 ///
 /// This provides values that need transformation during export,
@@ -277,6 +301,8 @@ pub struct MetadataContext<'a> {
     /// Stable personal-document ID used for both ASIN and content_id.
     /// Format: 32 uppercase hexadecimal characters.
     pub content_id: Option<String>,
+    /// Kindle library classification for this export.
+    pub content_type: KfxContentType,
 }
 
 /// Generate a book ID from a publication identifier.
@@ -373,6 +399,7 @@ pub fn build_category_entries(
                         ctx.book_id.clone()
                     }
                     MetadataField::ContentId => ctx.content_id.clone(),
+                    MetadataField::ContentType => Some(ctx.content_type.as_str().to_string()),
                     MetadataField::SeriesPosition => {
                         // Series position from collection
                         meta.collection.as_ref().and_then(|c| c.position).map(|p| {
@@ -640,6 +667,27 @@ mod tests {
             entries
                 .iter()
                 .any(|(k, v)| *k == "content_id" && v == "0123456789ABCDEF0123456789ABCDEF")
+        );
+    }
+
+    #[test]
+    fn test_personal_document_metadata_is_pdoc() {
+        let meta = Metadata {
+            title: "Test".to_string(),
+            language: "en".to_string(),
+            ..Default::default()
+        };
+        let ctx = MetadataContext {
+            content_type: KfxContentType::PersonalDocument,
+            ..Default::default()
+        };
+
+        let entries = build_category_entries(MetadataCategory::KindleTitle, &meta, &ctx);
+
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| *k == "cde_content_type" && v == "PDOC")
         );
     }
 

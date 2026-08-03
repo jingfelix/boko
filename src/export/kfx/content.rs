@@ -315,7 +315,12 @@ mod entity_structure_tests {
         let mut fragments = Vec::new();
 
         fragments.push(build_content_features_fragment(&ctx));
-        fragments.push(build_book_metadata_fragment(&book, &container_id, &ctx));
+        fragments.push(build_book_metadata_fragment(
+            &book,
+            &container_id,
+            &ctx,
+            KfxContentType::default(),
+        ));
         fragments.push(build_metadata_fragment(&ctx));
         fragments.push(build_document_data_fragment(&ctx));
         fragments.push(build_book_navigation_fragment_with_positions(&book, &ctx));

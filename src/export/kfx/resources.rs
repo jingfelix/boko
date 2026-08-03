@@ -335,7 +335,7 @@ mod resource_export_tests {
     #[test]
     fn test_kfx_export_includes_images() {
         let book = Book::open("tests/fixtures/epictetus.epub").unwrap();
-        let data = build_kfx_container(&book).unwrap();
+        let data = build_kfx_container(&book, &KfxConfig::default()).unwrap();
 
         // KFX should be > 400KB (images alone are ~401KB)
         assert!(
@@ -349,7 +349,7 @@ mod resource_export_tests {
     fn test_kfx_asset_roundtrip() {
         // Export EPUB to KFX
         let book = Book::open("tests/fixtures/epictetus.epub").unwrap();
-        let kfx_data = build_kfx_container(&book).unwrap();
+        let kfx_data = build_kfx_container(&book, &KfxConfig::default()).unwrap();
 
         // Write to temp file and re-open
         let temp_path = std::env::temp_dir().join("test_roundtrip.kfx");
@@ -456,7 +456,7 @@ mod anchor_resolution_tests {
     fn test_anchor_entities_created_in_full_export() {
         // Test that anchor entities are actually created during full export
         let book = Book::open("tests/fixtures/epictetus.epub").unwrap();
-        let kfx_data = build_kfx_container(&book).unwrap();
+        let kfx_data = build_kfx_container(&book, &KfxConfig::default()).unwrap();
 
         // Parse the KFX container to find anchor entities
         use crate::kfx::container::{

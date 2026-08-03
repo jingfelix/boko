@@ -83,8 +83,9 @@ pub use dom::compile_html;
 
 // Primary exports from other modules
 pub use export::{
-    Azw3Config, Azw3Exporter, EpubConfig, EpubExporter, Exporter, KfxExporter, MarkdownConfig,
-    MarkdownExporter,
+    Azw3Config, Azw3Exporter, EpubConfig, EpubExporter, Exporter, KfxConfig, KfxExporter,
+    MarkdownConfig, MarkdownExporter,
 };
 pub use import::{ChapterId, Importer, SpineEntry};
 pub use io::{ByteSource, FileSource};
+pub use kfx::metadata::KfxContentType;

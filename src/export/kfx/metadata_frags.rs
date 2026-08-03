@@ -59,6 +59,7 @@ pub(super) fn build_book_metadata_fragment(
     book: &Book,
     container_id: &str,
     ctx: &ExportContext,
+    content_type: KfxContentType,
 ) -> KfxFragment {
     let meta = book.metadata();
 
@@ -108,6 +109,7 @@ pub(super) fn build_book_metadata_fragment(
         asset_id: Some(container_id),
         book_id,
         content_id,
+        content_type,
     };
 
     // Build each category using the schema

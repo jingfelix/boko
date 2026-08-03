@@ -558,7 +558,8 @@ mod tests {
         let ctx = ExportContext::new();
         let container_id = generate_container_id("test-seed");
 
-        let frag = build_book_metadata_fragment(&book, &container_id, &ctx);
+        let frag =
+            build_book_metadata_fragment(&book, &container_id, &ctx, KfxContentType::default());
 
         // Should be $490 (book_metadata) type
         assert_eq!(frag.ftype, KfxSymbol::BookMetadata as u64);

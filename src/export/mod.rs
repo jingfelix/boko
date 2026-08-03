@@ -47,7 +47,7 @@ pub use html_synth::{
     synthesize_html_with_class_list, synthesize_xhtml_document,
     synthesize_xhtml_document_with_class_list, synthesize_xhtml_document_with_class_list_math,
 };
-pub use kfx::KfxExporter;
+pub use kfx::{KfxConfig, KfxExporter};
 pub use normalize::{ChapterContent, GlobalStylePool, NormalizedContent, normalize_book};
 pub use text::{MarkdownConfig, MarkdownExporter};
 

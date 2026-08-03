@@ -31,7 +31,7 @@ use crate::kfx::cover::{
 use crate::kfx::fragment::KfxFragment;
 use crate::kfx::ion::IonValue;
 use crate::kfx::metadata::{
-    MetadataCategory, MetadataContext, build_category_entries, generate_book_id,
+    KfxContentType, MetadataCategory, MetadataContext, build_category_entries, generate_book_id,
     generate_content_id,
 };
 use crate::kfx::serialization::{
@@ -48,20 +48,42 @@ use crate::util::detect_media_format;
 /// KFX format exporter.
 ///
 /// Converts books to Amazon's KFX format for Kindle devices.
-#[derive(Default)]
-pub struct KfxExporter;
+#[derive(Debug, Clone, Default)]
+pub struct KfxConfig {
+    /// Whether Kindle should classify the output as a book or personal document.
+    pub content_type: KfxContentType,
+}
+
+/// Converts books to Amazon's KFX format for Kindle devices.
+pub struct KfxExporter {
+    config: KfxConfig,
+}
 
 impl KfxExporter {
     /// Create a new KfxExporter.
     pub fn new() -> Self {
-        Self
+        Self {
+            config: KfxConfig::default(),
+        }
+    }
+
+    /// Configure the exporter with custom settings.
+    pub fn with_config(mut self, config: KfxConfig) -> Self {
+        self.config = config;
+        self
+    }
+}
+
+impl Default for KfxExporter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Exporter for KfxExporter {
     fn export<W: Write + Seek>(&self, book: &Book, writer: &mut W) -> crate::Result<()> {
         // Build the KFX container
-        let data = build_kfx_container(book)?;
+        let data = build_kfx_container(book, &self.config)?;
         writer.write_all(&data)?;
         Ok(())
     }
@@ -72,7 +94,7 @@ impl Exporter for KfxExporter {
 /// This follows a strict Two-Pass architecture:
 /// - Pass 1 (Survey): Walk IR, build position map, intern symbols - NO ION GENERATION
 /// - Pass 2 (Synthesis): Generate Ion using pre-computed positions
-fn build_kfx_container(book: &Book) -> crate::Result<Vec<u8>> {
+fn build_kfx_container(book: &Book, config: &KfxConfig) -> crate::Result<Vec<u8>> {
     // Seed the container ID from the book's identity so the same book always
     // exports byte-identically; the title is included so books without an
     // identifier still diverge from each other.
@@ -118,7 +140,12 @@ fn build_kfx_container(book: &Book) -> crate::Result<Vec<u8>> {
     fragments.push(build_content_features_fragment(&ctx));
 
     // 2b. Book metadata fragment ($490) - contains categorised_metadata
-    fragments.push(build_book_metadata_fragment(book, &container_id, &ctx));
+    fragments.push(build_book_metadata_fragment(
+        book,
+        &container_id,
+        &ctx,
+        config.content_type,
+    ));
 
     // 2c. Metadata fragment ($258) - contains reading_orders
     fragments.push(build_metadata_fragment(&ctx));
