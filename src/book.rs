@@ -51,6 +51,28 @@ pub struct Book {
     targeted_toc: OnceLock<Vec<TocEntry>>,
     /// Memoized link resolution, shared with callers as an `Arc`.
     resolved_links: OnceLock<Arc<ResolvedLinks>>,
+    /// Replacement bytes for an existing cover asset.
+    cover_replacement: Option<(String, Vec<u8>)>,
+    /// Assets injected at runtime, such as a cover added to a coverless book.
+    added_assets: Vec<(String, Vec<u8>)>,
+    /// Backend and injected asset paths, materialized for `list_assets()`.
+    merged_assets: Vec<String>,
+}
+
+fn same_asset_path(left: &str, right: &str) -> bool {
+    left == right
+        || Path::new(left).file_name().is_some()
+            && Path::new(left).file_name() == Path::new(right).file_name()
+}
+
+fn cover_extension(bytes: &[u8]) -> &'static str {
+    match crate::util::detect_media_format("", bytes) {
+        crate::util::MediaFormat::Png => "png",
+        crate::util::MediaFormat::Gif => "gif",
+        crate::util::MediaFormat::Svg => "svg",
+        crate::util::MediaFormat::WebP => "webp",
+        _ => "jpg",
+    }
 }
 
 impl Book {
@@ -99,6 +121,9 @@ impl Book {
             fixed_toc: OnceLock::new(),
             targeted_toc: OnceLock::new(),
             resolved_links: OnceLock::new(),
+            cover_replacement: None,
+            added_assets: Vec::new(),
+            merged_assets: Vec::new(),
         }
     }
 
@@ -388,12 +413,75 @@ impl Book {
 
     /// Load an asset by archive entry name (e.g. `"OEBPS/images/cover.jpg"`).
     pub fn load_asset(&self, path: &str) -> crate::Result<Vec<u8>> {
+        if let Some((cover_path, bytes)) = &self.cover_replacement
+            && same_asset_path(cover_path, path)
+        {
+            return Ok(bytes.clone());
+        }
+        if let Some((_, bytes)) = self
+            .added_assets
+            .iter()
+            .find(|(asset_path, _)| same_asset_path(asset_path, path))
+        {
+            return Ok(bytes.clone());
+        }
         self.backend.load_asset(path)
+    }
+
+    /// Set the cover image bytes before export.
+    ///
+    /// An existing cover is replaced in place. A coverless book receives a
+    /// new `cover_boko.<ext>` asset and its metadata is updated accordingly.
+    pub fn set_cover(&mut self, image_bytes: Vec<u8>) -> io::Result<()> {
+        if let Some(cover_path) = self.metadata().cover_image.clone()
+            && let Some(asset_path) = self
+                .list_assets()
+                .iter()
+                .find(|path| same_asset_path(path, &cover_path))
+                .cloned()
+        {
+            if let Some((_, bytes)) = self
+                .added_assets
+                .iter_mut()
+                .find(|(path, _)| path == &asset_path)
+            {
+                *bytes = image_bytes;
+            } else {
+                self.cover_replacement = Some((asset_path, image_bytes));
+            }
+            return Ok(());
+        }
+
+        let extension = cover_extension(&image_bytes);
+        let mut suffix = 1usize;
+        let asset_path = loop {
+            let candidate = if suffix == 1 {
+                format!("cover_boko.{extension}")
+            } else {
+                format!("cover_boko_{suffix}.{extension}")
+            };
+            if !self.list_assets().iter().any(|path| path == &candidate) {
+                break candidate;
+            }
+            suffix += 1;
+        };
+
+        if self.merged_assets.is_empty() {
+            self.merged_assets = self.backend.list_assets().to_vec();
+        }
+        self.merged_assets.push(asset_path.clone());
+        self.added_assets.push((asset_path.clone(), image_bytes));
+        self.metadata_mut().cover_image = Some(asset_path);
+        Ok(())
     }
 
     /// List all assets as archive entry names (forward-slash separated).
     pub fn list_assets(&self) -> &[String] {
-        self.backend.list_assets()
+        if self.merged_assets.is_empty() {
+            self.backend.list_assets()
+        } else {
+            &self.merged_assets
+        }
     }
 
     /// Collect all @font-face definitions from CSS files.
