@@ -8,8 +8,8 @@ mod kfx_dump;
 use serde::Serialize;
 
 use boko::{
-    Book, Chapter, ChapterId, Exporter, Format, KfxConfig, KfxContentType, KfxExporter, NodeId,
-    Role, ToCss, TocEntry, extract_section_tree,
+    Azw3Config, Azw3ContentType, Azw3Exporter, Book, Chapter, ChapterId, Exporter, Format,
+    KfxConfig, KfxContentType, KfxExporter, NodeId, Role, ToCss, TocEntry, extract_section_tree,
 };
 
 #[derive(Parser)]
@@ -58,9 +58,9 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
 
-        /// Classify KFX output as a personal document (PDOC) instead of a book (EBOK)
-        #[arg(long)]
-        kfx_personal_document: bool,
+        /// Classify KFX/AZW3 output as a personal document (PDOC) instead of a book (EBOK)
+        #[arg(long = "personal-document", visible_alias = "kfx-personal-document")]
+        personal_document: bool,
     },
 
     /// Dump KFX/KDF/Ion files for debugging (KFX containers and raw Ion binary)
@@ -126,7 +126,7 @@ fn main() -> ExitCode {
             to_format,
             optimize,
             quiet,
-            kfx_personal_document,
+            personal_document,
         } => convert(
             &input,
             output.as_deref(),
@@ -134,7 +134,7 @@ fn main() -> ExitCode {
             to_format,
             optimize,
             quiet,
-            kfx_personal_document,
+            personal_document,
         ),
         Command::Dump {
             file,
@@ -514,7 +514,7 @@ fn convert(
     to_format: Option<FormatArg>,
     optimize: bool,
     quiet: bool,
-    kfx_personal_document: bool,
+    personal_document: bool,
 ) -> Result<(), String> {
     // Check if reading from stdin
     let from_stdin = input == "-";
@@ -560,8 +560,8 @@ fn convert(
     if output_format == Format::Mobi {
         return Err("MOBI output is not supported; use .azw3 instead".to_string());
     }
-    if kfx_personal_document && output_format != Format::Kfx {
-        return Err("--kfx-personal-document requires KFX output".to_string());
+    if personal_document && !matches!(output_format, Format::Kfx | Format::Azw3) {
+        return Err("--personal-document requires KFX or AZW3 output".to_string());
     }
 
     // Check if writing to stdout
@@ -614,7 +614,7 @@ fn convert(
         // Write to stdout
         let mut stdout = std::io::stdout();
         let mut cursor = std::io::Cursor::new(Vec::new());
-        export_book(&book, output_format, &mut cursor, kfx_personal_document)
+        export_book(&book, output_format, &mut cursor, personal_document)
             .map_err(|e| format!("Conversion failed: {e}"))?;
         use std::io::Write;
         stdout
@@ -627,7 +627,7 @@ fn convert(
         // Buffer the writer: the EPUB ZipWriter issues many small writes, each
         // of which would otherwise be a syscall.
         let mut writer = std::io::BufWriter::with_capacity(64 << 10, file);
-        export_book(&book, output_format, &mut writer, kfx_personal_document)
+        export_book(&book, output_format, &mut writer, personal_document)
             .map_err(|e| format!("Conversion failed: {e}"))?;
         std::io::Write::flush(&mut writer).map_err(|e| format!("Write failed: {e}"))?;
     }
@@ -643,19 +643,33 @@ fn export_book<W: std::io::Write + std::io::Seek>(
     book: &Book,
     format: Format,
     writer: &mut W,
-    kfx_personal_document: bool,
+    personal_document: bool,
 ) -> boko::Result<()> {
-    if format == Format::Kfx {
-        let content_type = if kfx_personal_document {
-            KfxContentType::PersonalDocument
-        } else {
-            KfxContentType::Ebook
-        };
-        KfxExporter::new()
-            .with_config(KfxConfig { content_type })
-            .export(book, writer)
-    } else {
-        book.export(format, writer)
+    match format {
+        Format::Kfx => {
+            let content_type = if personal_document {
+                KfxContentType::PersonalDocument
+            } else {
+                KfxContentType::Ebook
+            };
+            KfxExporter::new()
+                .with_config(KfxConfig { content_type })
+                .export(book, writer)
+        }
+        Format::Azw3 => {
+            let content_type = if personal_document {
+                Azw3ContentType::PersonalDocument
+            } else {
+                Azw3ContentType::Ebook
+            };
+            Azw3Exporter::new()
+                .with_config(Azw3Config {
+                    normalize: false,
+                    content_type,
+                })
+                .export(book, writer)
+        }
+        _ => book.export(format, writer),
     }
 }
 

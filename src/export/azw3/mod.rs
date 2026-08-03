@@ -31,12 +31,33 @@ mod kf8;
 
 use kf8::Kf8Builder;
 
+/// How a sideloaded AZW3 is classified by Kindle devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Azw3ContentType {
+    /// Kindle book (`EBOK`). Keeps the item on the Books shelf.
+    #[default]
+    Ebook,
+    /// Personal document (`PDOC`). Avoids Amazon's store-cover lookup path.
+    PersonalDocument,
+}
+
+impl Azw3ContentType {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ebook => "EBOK",
+            Self::PersonalDocument => "PDOC",
+        }
+    }
+}
+
 /// Configuration for AZW3 export.
 #[derive(Debug, Clone, Default)]
 pub struct Azw3Config {
     /// If true, normalize content through IR pipeline for clean, consistent output.
     /// Default is false (passthrough mode preserves original HTML/CSS).
     pub normalize: bool,
+    /// Whether Kindle should classify the output as a book or personal document.
+    pub content_type: Azw3ContentType,
 }
 
 /// AZW3/KF8 format exporter.
@@ -73,7 +94,7 @@ impl Exporter for Azw3Exporter {
         // it (e.g. KFX raw content is binary Ion, not HTML) — otherwise the
         // builder would chunk and compress that binary as if it were XHTML.
         let normalize = self.config.normalize || book.requires_normalized_export();
-        let builder = Kf8Builder::new(book, normalize)?;
+        let builder = Kf8Builder::new(book, normalize, self.config.content_type)?;
         Ok(builder.write(writer)?)
     }
 }

@@ -39,7 +39,7 @@ mod kfx;
 mod normalize;
 mod text;
 
-pub use azw3::{Azw3Config, Azw3Exporter};
+pub use azw3::{Azw3Config, Azw3ContentType, Azw3Exporter};
 pub use css_gen::{CssArtifact, generate_css, generate_css_all};
 pub use epub::{EpubConfig, EpubExporter};
 pub use html_synth::{

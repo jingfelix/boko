@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct Kf8Builder {
     ctx: BookContext,
+    content_type: Azw3ContentType,
     records: Vec<Vec<u8>>,
     text_length: usize,
     last_text_record: u16,
@@ -38,11 +39,16 @@ pub(super) struct Kf8Builder {
 }
 
 impl Kf8Builder {
-    pub(super) fn new(book: &Book, normalize: bool) -> crate::Result<Self> {
+    pub(super) fn new(
+        book: &Book,
+        normalize: bool,
+        content_type: Azw3ContentType,
+    ) -> crate::Result<Self> {
         let ctx = BookContext::from_book(book, normalize)?;
 
         let mut builder = Self {
             ctx,
+            content_type,
             records: vec![Vec::new()], // Placeholder for record 0
             text_length: 0,
             last_text_record: 0,
@@ -798,11 +804,12 @@ impl Kf8Builder {
         // Title (503)
         records.push((503, self.ctx.metadata.title.as_bytes().to_vec()));
 
-        // ASIN placeholder (113)
-        records.push((113, b"EBOK000000".to_vec()));
+        // Stable sideload identifier (113). Kindle and transfer software use
+        // this together with the content type as the library-thumbnail key.
+        records.push((113, sideload_content_id(&self.ctx.metadata).into_bytes()));
 
         // Document type (501)
-        records.push((501, b"EBOK".to_vec()));
+        records.push((501, self.content_type.as_str().as_bytes().to_vec()));
 
         // (EXTH 504 intentionally omitted — calibre does not emit it and
         // it confused some Kindle firmware versions in our testing.)
@@ -997,6 +1004,19 @@ pub(super) fn book_uid(identifier: &str, title: &str) -> u32 {
     u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
 }
 
+/// Generate the stable ID used for EXTH 113 and Kindle's thumbnail cache.
+/// Prefer the publication identifier, with title and authors as a fallback for
+/// books that do not provide one. This mirrors the KFX exporter so converting
+/// the same publication to either Kindle format keeps a consistent identity.
+pub(super) fn sideload_content_id(metadata: &crate::model::Metadata) -> String {
+    let seed = if metadata.identifier.is_empty() {
+        format!("{}\n{}", metadata.title, metadata.authors.join("&"))
+    } else {
+        metadata.identifier.clone()
+    };
+    crate::kfx::metadata::generate_content_id(&seed)
+}
+
 pub(super) fn sanitize_title(title: &str) -> String {
     title
         .chars()
@@ -1013,5 +1033,29 @@ mod tests {
     fn test_sanitize_title() {
         assert_eq!(sanitize_title("Hello World"), "Hello_World");
         assert_eq!(sanitize_title("Test <Book>"), "Test_Book");
+    }
+
+    #[test]
+    fn sideload_content_id_is_stable_unique_uppercase_hex() {
+        let first = crate::model::Metadata {
+            title: "First".to_string(),
+            authors: vec!["Author".to_string()],
+            ..Default::default()
+        };
+        let second = crate::model::Metadata {
+            title: "Second".to_string(),
+            authors: vec!["Author".to_string()],
+            ..Default::default()
+        };
+
+        let first_id = sideload_content_id(&first);
+        assert_eq!(first_id, sideload_content_id(&first));
+        assert_ne!(first_id, sideload_content_id(&second));
+        assert_eq!(first_id.len(), 32);
+        assert!(
+            first_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+        );
     }
 }
