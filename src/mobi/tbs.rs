@@ -326,10 +326,10 @@ fn sequences_to_bytes(seqs: &[(u64, Extras)]) -> Vec<u8> {
     out
 }
 
-/// Compute TBS bytes for each text record. Output is a Vec<Vec<u8>> with one
-/// entry per text record (already wrapped via `encode_trailing_data` so it can
-/// be appended directly to the record before the multibyte indicator byte).
-pub fn build_tbs_for_records(entries: &[TbsEntry], record_lengths: &[u64]) -> Vec<Vec<u8>> {
+fn collect_indexing_data(
+    entries: &[TbsEntry],
+    record_lengths: &[u64],
+) -> Vec<Vec<BTreeMap<u32, Vec<LocalEntry>>>> {
     // Sort by start position so collect_indexing_data can early-exit.
     let mut sorted: Vec<&TbsEntry> = entries.iter().collect();
     sorted.sort_by_key(|e| e.start);
@@ -348,19 +348,45 @@ pub fn build_tbs_for_records(entries: &[TbsEntry], record_lengths: &[u64]) -> Ve
             }
             local.push(fill_entry(entry, record_start, rec_length));
         }
-        let strands = separate_strands(local);
-
-        // Try tbs_type=8 first, fall back to 5 on NegativeStrandIndex.
-        let seqs = match encode_strands_as_sequences(&strands, 8) {
-            Ok(s) => s,
-            Err(_) => encode_strands_as_sequences(&strands, 5).unwrap_or_default(),
-        };
-        let tbs_bytes = sequences_to_bytes(&seqs);
-        out.push(encode_trailing_data(&tbs_bytes));
+        out.push(separate_strands(local));
 
         record_start = next_record_start;
     }
     out
+}
+
+fn calculate_all_tbs(
+    indexing_data: &[Vec<BTreeMap<u32, Vec<LocalEntry>>>],
+    tbs_type: u64,
+) -> Result<Vec<Vec<u8>>, NegativeStrandIndex> {
+    indexing_data
+        .iter()
+        .map(|strands| {
+            encode_strands_as_sequences(strands, tbs_type).map(|seqs| sequences_to_bytes(&seqs))
+        })
+        .collect()
+}
+
+/// Compute TBS bytes for each text record. Output is a Vec<Vec<u8>> with one
+/// entry per text record (already wrapped via `encode_trailing_data` so it can
+/// be appended directly to the record after the multibyte indicator byte).
+pub fn build_tbs_for_records(entries: &[TbsEntry], record_lengths: &[u64]) -> Vec<Vec<u8>> {
+    let indexing_data = collect_indexing_data(entries, record_lengths);
+
+    // The TBS type is book-wide, not record-local. If any record needs the
+    // type-5 representation, rebuild every record as type 5. Mixing type 8
+    // and type 5 trailers in one book produces a position map that Kindle
+    // firmware cannot navigate reliably. This mirrors calibre's
+    // apply_trailing_byte_sequences implementation.
+    let raw_records = calculate_all_tbs(&indexing_data, 8).unwrap_or_else(|_| {
+        calculate_all_tbs(&indexing_data, 5)
+            .expect("type-5 TBS encoding cannot produce a negative strand index")
+    });
+
+    raw_records
+        .into_iter()
+        .map(|raw| encode_trailing_data(&raw))
+        .collect()
 }
 
 #[cfg(test)]
@@ -425,5 +451,65 @@ mod tests {
         // Record 0 should be non-empty; record 1 should be just the size byte.
         assert!(tbs[0].len() > 1, "record 0 should have a sequence");
         assert_eq!(tbs[1], vec![0x81]);
+    }
+
+    fn decode_first_sequence_type(trailer: &[u8]) -> Option<u64> {
+        // These test trailers are short enough that their backward size VWI
+        // is one byte. Empty TBS data is represented by only that size byte.
+        let raw = trailer.get(..trailer.len().checked_sub(1)?)?;
+        if raw.is_empty() {
+            return None;
+        }
+
+        fn decint_forward(raw: &[u8]) -> Option<(u64, usize)> {
+            let mut value = 0u64;
+            for (i, byte) in raw.iter().copied().enumerate() {
+                value = (value << 7) | u64::from(byte & 0x7f);
+                if byte & 0x80 != 0 {
+                    return Some((value, i + 1));
+                }
+            }
+            None
+        }
+
+        let (value_and_flags, consumed) = decint_forward(raw)?;
+        if value_and_flags & 0b010 == 0 {
+            return None;
+        }
+        decint_forward(&raw[consumed..]).map(|(value, _)| value)
+    }
+
+    #[test]
+    fn negative_strand_fallback_uses_type_five_for_the_whole_book() {
+        // Record 0 contains one root/child strand and is valid as type 8.
+        // Record 1 also contains the following root, which creates a second
+        // strand with a negative cross-strand index and forces type 5.
+        let entries = vec![
+            TbsEntry {
+                index: 0,
+                start: 0,
+                length: 150,
+                depth: 0,
+                parent: -1,
+            },
+            TbsEntry {
+                index: 1,
+                start: 0,
+                length: 150,
+                depth: 1,
+                parent: 0,
+            },
+            TbsEntry {
+                index: 2,
+                start: 120,
+                length: 40,
+                depth: 0,
+                parent: -1,
+            },
+        ];
+
+        let tbs = build_tbs_for_records(&entries, &[100, 100]);
+        assert_eq!(decode_first_sequence_type(&tbs[0]), Some(5));
+        assert_eq!(decode_first_sequence_type(&tbs[1]), Some(5));
     }
 }
