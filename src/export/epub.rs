@@ -110,6 +110,26 @@ impl EpubExporter {
         let spine = book.spine();
         let mut manifest_items: Vec<ManifestItem> = Vec::new();
         let mut spine_refs: Vec<String> = Vec::new();
+        let assets = book.list_assets();
+
+        // Re-mount a source content root (commonly `OEBPS/` or `OPS/`) under
+        // our generated `OEBPS/` directory. Keeping the source root would
+        // produce paths such as `OEBPS/OEBPS/chapter.xhtml`.
+        let source_paths = spine
+            .iter()
+            .filter_map(|entry| book.source_id(entry.id))
+            .chain(
+                assets
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|path| !is_source_packaging(path)),
+            );
+        let source_root = common_content_root(source_paths);
+        let output_path = |path: &str| {
+            let path = sanitize_path(path);
+            let relative = path.strip_prefix(&source_root).unwrap_or(&path);
+            format!("OEBPS/{relative}")
+        };
 
         // The importer surfaces every ZIP entry as an asset, including the spine
         // XHTML documents. Those are written as chapters below, so track their
@@ -118,12 +138,7 @@ impl EpubExporter {
         // duplicate-filename error on strict ZIP writers.
         let chapter_paths: std::collections::HashSet<String> = spine
             .iter()
-            .map(|entry| {
-                format!(
-                    "OEBPS/{}",
-                    sanitize_path(book.source_id(entry.id).unwrap_or("unknown.xhtml"))
-                )
-            })
+            .map(|entry| output_path(book.source_id(entry.id).unwrap_or("unknown.xhtml")))
             .collect();
 
         // Add chapters to manifest (written at their original source paths)
@@ -133,7 +148,7 @@ impl EpubExporter {
 
             manifest_items.push(ManifestItem {
                 id: id.clone(),
-                href: format!("OEBPS/{}", sanitize_path(source_path)),
+                href: output_path(source_path),
                 media_type: "application/xhtml+xml",
                 properties: None,
             });
@@ -144,13 +159,11 @@ impl EpubExporter {
         // META-INF/, OPF, NCX) must not be re-bundled: we generate fresh ones,
         // and shipping the stale originals bloats the book and confuses
         // validators.
-        let assets = book.list_assets();
-
         for (i, asset_path) in assets.iter().enumerate() {
             if is_source_packaging(asset_path) {
                 continue;
             }
-            let href = format!("OEBPS/{}", sanitize_path(asset_path));
+            let href = output_path(asset_path);
             // Skip spine documents already emitted as chapters (see above).
             if chapter_paths.contains(&href) {
                 continue;
@@ -166,7 +179,8 @@ impl EpubExporter {
             });
         }
 
-        mark_cover_image(&mut manifest_items, book.metadata().cover_image.as_deref());
+        let output_cover = book.metadata().cover_image.as_deref().map(&output_path);
+        mark_cover_image(&mut manifest_items, output_cover.as_deref());
 
         // EPUB 3 requires exactly one manifest item with the `nav` property;
         // synthesize a nav document (at a path no source file occupies).
@@ -187,8 +201,9 @@ impl EpubExporter {
         let first_chapter_href = spine
             .first()
             .map(|entry| sanitize_path(book.source_id(entry.id).unwrap_or("unknown.xhtml")));
+        let remapped_toc = remap_toc_root(book.toc(), &source_root);
         let toc = toc_or_fallback(
-            book.toc(),
+            &remapped_toc,
             &book.metadata().title,
             first_chapter_href.as_deref(),
         );
@@ -217,7 +232,7 @@ impl EpubExporter {
                 .unwrap_or("unknown.xhtml")
                 .to_string();
             let content = book.load_raw(entry.id)?;
-            let zip_path = format!("OEBPS/{}", sanitize_path(&source_path));
+            let zip_path = output_path(&source_path);
 
             zip.start_file(&zip_path, deflated).map_err(io_error)?;
             zip.write_all(&content)?;
@@ -229,7 +244,7 @@ impl EpubExporter {
             if is_source_packaging(asset_path) {
                 continue;
             }
-            let zip_path = format!("OEBPS/{}", sanitize_path(asset_path));
+            let zip_path = output_path(asset_path);
             if chapter_paths.contains(&zip_path) {
                 continue;
             }
@@ -479,11 +494,12 @@ fn is_source_packaging(path: &str) -> bool {
 fn mark_cover_image(manifest_items: &mut [ManifestItem], cover_image: Option<&str>) {
     let Some(cover) = cover_image else { return };
     let sanitized = sanitize_path(cover);
+    let normalized_cover = sanitized.strip_prefix("OEBPS/").unwrap_or(&sanitized);
     // cover_image is importer-relative; hrefs are OEBPS/-prefixed zip paths
     // that may carry an extra source directory, so match on the path tail.
     if let Some(item) = manifest_items.iter_mut().find(|item| {
         let href = item.href.strip_prefix("OEBPS/").unwrap_or(&item.href);
-        (href == sanitized || href.ends_with(&format!("/{sanitized}")))
+        (href == normalized_cover || href.ends_with(&format!("/{normalized_cover}")))
             && item.media_type.starts_with("image/")
     }) {
         item.properties = Some("cover-image");
@@ -897,6 +913,52 @@ fn sanitize_path(path: &str) -> String {
     path.trim_start_matches('/')
         .replace('\\', "/")
         .replace("//", "/")
+}
+
+/// Return a shared first directory component such as `OEBPS/`, or an empty
+/// string when the content is already spread across root-level directories.
+fn common_content_root<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    let mut root: Option<&str> = None;
+    for path in paths {
+        let path = path.trim_start_matches('/');
+        let Some((candidate, _)) = path.split_once('/') else {
+            continue;
+        };
+        match root {
+            None => root = Some(candidate),
+            Some(existing) if existing == candidate => {}
+            Some(_) => return String::new(),
+        }
+    }
+    root.map(|root| format!("{root}/")).unwrap_or_default()
+}
+
+fn remap_toc_root(entries: &[TocEntry], source_root: &str) -> Vec<TocEntry> {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut entry = entry.clone();
+            if !source_root.is_empty()
+                && !entry.href.contains("://")
+                && !entry.href.starts_with('#')
+            {
+                let (path, fragment) = entry
+                    .href
+                    .split_once('#')
+                    .map_or((entry.href.as_str(), None), |(path, fragment)| {
+                        (path, Some(fragment))
+                    });
+                let path = sanitize_path(path);
+                let path = path.strip_prefix(source_root).unwrap_or(&path);
+                entry.href = match fragment {
+                    Some(fragment) => format!("{path}#{fragment}"),
+                    None => path.to_string(),
+                };
+            }
+            entry.children = remap_toc_root(&entry.children, source_root);
+            entry
+        })
+        .collect()
 }
 
 #[cfg(test)]
