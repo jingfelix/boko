@@ -127,7 +127,7 @@ fn test_epub_toc_resolution() {
 #[test]
 fn test_epub_body_id_toc_resolves_to_chapter_start() {
     let epub = epub_with_body_toc_anchor();
-    let mut book = Book::from_bytes(&epub, boko::Format::Epub).expect("open EPUB");
+    let book = Book::from_bytes(&epub, boko::Format::Epub).expect("open EPUB");
 
     book.resolve_links().expect("resolve links");
 
