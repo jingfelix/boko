@@ -1,6 +1,49 @@
 use super::guide::*;
 use super::*;
 
+/// Number of bytes after `end` needed to complete a UTF-8 codepoint cut by a
+/// text-record boundary. KF8 stores these bytes uncompressed at the end of
+/// the preceding record (and repeats them normally at the next record's
+/// start), allowing a renderer to decode every record independently.
+fn utf8_overlap_len(text: &[u8], end: usize) -> usize {
+    if end == 0 || end >= text.len() {
+        return 0;
+    }
+
+    let mut char_start = end - 1;
+    while char_start > 0 && text[char_start] & 0b1100_0000 == 0b1000_0000 {
+        char_start -= 1;
+    }
+
+    let width = match text[char_start] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    };
+    let present = end - char_start;
+    if present >= width || char_start + width > text.len() {
+        return 0;
+    }
+    if text[char_start + 1..char_start + width]
+        .iter()
+        .all(|byte| byte & 0b1100_0000 == 0b1000_0000)
+    {
+        width - present
+    } else {
+        0
+    }
+}
+
+fn compress_text_record(text: &[u8], start: usize, end: usize) -> Vec<u8> {
+    let overlap_end = (end + utf8_overlap_len(text, end)).min(text.len());
+    let overlap = &text[end..overlap_end];
+    let mut record = crate::mobi::palmdoc::compress(&text[start..end]);
+    record.extend_from_slice(overlap);
+    record.push(overlap.len() as u8);
+    record
+}
+
 pub(super) struct Kf8Builder {
     ctx: BookContext,
     content_type: Azw3ContentType,
@@ -226,24 +269,34 @@ impl Kf8Builder {
         }
         self.flows_length = all_flows.len();
 
-        // Split into records and PalmDoc-compress. Records are compressed
-        // independently, so this fans out across chunks (the compression is
-        // the bulk of AZW3 export time on large books).
-        fn compress_record(chunk: &[u8]) -> Vec<u8> {
-            let mut record = crate::mobi::palmdoc::compress(chunk);
-            record.push(0); // multibyte indicator (0 = no UTF-8 overlap)
-            record
-        }
+        // Split into records and PalmDoc-compress. If a 4096-byte boundary
+        // cuts through a UTF-8 codepoint, KF8 repeats the missing bytes after
+        // the compressed record and stores their count in the multibyte
+        // indicator. Kindle lays out records independently and needs this
+        // overlap even though concatenating the decompressed payloads alone
+        // happens to reconstruct the original byte stream.
+        let record_count = all_flows.len().div_ceil(RECORD_SIZE);
         #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
         {
             use rayon::prelude::*;
-            self.records
-                .par_extend(all_flows.par_chunks(RECORD_SIZE).map(compress_record));
+            let records: Vec<Vec<u8>> = (0..record_count)
+                .into_par_iter()
+                .map(|i| {
+                    let start = i * RECORD_SIZE;
+                    let end = (start + RECORD_SIZE).min(all_flows.len());
+                    compress_text_record(&all_flows, start, end)
+                })
+                .collect();
+            self.records.extend(records);
         }
         #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
         {
-            self.records
-                .extend(all_flows.chunks(RECORD_SIZE).map(compress_record));
+            for i in 0..record_count {
+                let start = i * RECORD_SIZE;
+                let end = (start + RECORD_SIZE).min(all_flows.len());
+                self.records
+                    .push(compress_text_record(&all_flows, start, end));
+            }
         }
 
         // The PDB record count is a u16, so the whole book is capped at 65535
@@ -1033,6 +1086,33 @@ mod tests {
     fn test_sanitize_title() {
         assert_eq!(sanitize_title("Hello World"), "Hello_World");
         assert_eq!(sanitize_title("Test <Book>"), "Test_Book");
+    }
+
+    #[test]
+    fn utf8_record_overlap_completes_split_codepoint() {
+        let text = "ab美cd😀ef".as_bytes();
+        assert_eq!(utf8_overlap_len(text, 3), 2); // after first byte of 美
+        assert_eq!(utf8_overlap_len(text, 4), 1); // after second byte of 美
+        assert_eq!(utf8_overlap_len(text, 5), 0); // complete 美
+        assert_eq!(utf8_overlap_len(text, 8), 3); // after first byte of 😀
+        assert_eq!(utf8_overlap_len(text, 10), 1); // after third byte of 😀
+        assert_eq!(utf8_overlap_len(text, 11), 0); // complete 😀
+        assert_eq!(utf8_overlap_len(text, text.len()), 0);
+    }
+
+    #[test]
+    fn compressed_record_carries_utf8_overlap_and_indicator() {
+        let mut text = vec![b'x'; RECORD_SIZE - 1];
+        text.extend_from_slice("美".as_bytes());
+        let record = compress_text_record(&text, 0, RECORD_SIZE);
+
+        assert_eq!(record.last(), Some(&2));
+        assert_eq!(
+            &record[record.len() - 3..record.len() - 1],
+            &"美".as_bytes()[1..]
+        );
+        let decompressed = crate::mobi::palmdoc::decompress(&record[..record.len() - 3]).unwrap();
+        assert_eq!(decompressed, text[..RECORD_SIZE]);
     }
 
     #[test]

@@ -17,29 +17,6 @@ pub fn write_base32_4(num: usize, buf: &mut [u8; 4]) {
     buf[0] = DIGITS[(num / 32768) % 32];
 }
 
-/// Kindle base32 encoding without zero padding.
-///
-/// KF8 element AIDs use this variable-width form. In particular, calibre
-/// starts every spine item's AID namespace at `spine_index * 1_000_000`,
-/// producing `0`, `UGI0`, `1T140`, ... for successive document bodies.
-#[inline]
-pub fn encode_base32(mut num: usize) -> String {
-    const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
-    if num == 0 {
-        return "0".to_string();
-    }
-
-    // Enough for every plausible usize width, including 128-bit targets.
-    let mut buf = [0u8; 32];
-    let mut pos = buf.len();
-    while num != 0 {
-        pos -= 1;
-        buf[pos] = DIGITS[num % 32];
-        num /= 32;
-    }
-    std::str::from_utf8(&buf[pos..]).unwrap().to_string()
-}
-
 /// Fixed-size base32 encoding for 10 digits (link offsets)
 #[inline]
 pub fn write_base32_10(num: usize, buf: &mut [u8; 10]) {
@@ -778,7 +755,7 @@ fn should_drop_attr(name: &[u8]) -> bool {
 pub fn add_aid_attributes_fast(
     html: &[u8],
     file_href: &str,
-    aid_counter: &mut usize,
+    aid_counter: &mut u32,
     id_map: &mut HashMap<(String, String), String>,
 ) -> AidInsertResult {
     use super::skeleton::AID_ABLE_TAGS;
@@ -841,7 +818,9 @@ pub fn add_aid_attributes_fast(
 
                 if is_aidable && tag.find(b"aid=").is_none() {
                     // Generate aid
-                    let aid_str = encode_base32(*aid_counter);
+                    let mut aid_buf = [0u8; 4];
+                    write_base32_4(*aid_counter as usize, &mut aid_buf);
+                    let aid_str = std::str::from_utf8(&aid_buf).unwrap().to_string();
                     *aid_counter += 1;
 
                     // Record original position -> aid mapping for filepos resolution
@@ -881,7 +860,7 @@ pub fn add_aid_attributes_fast(
                         // No attributes, just add aid
                         output.extend_from_slice(b" aid=\"");
                     }
-                    output.extend_from_slice(aid_str.as_bytes());
+                    output.extend_from_slice(&aid_buf);
                     output.push(b'"');
 
                     // Copy closing
@@ -930,14 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_base32_variable_width() {
-        assert_eq!(encode_base32(0), "0");
-        assert_eq!(encode_base32(1), "1");
-        assert_eq!(encode_base32(1_000_000), "UGI0");
-        assert_eq!(encode_base32(2_000_000), "1T140");
-    }
-
-    #[test]
     fn test_attribute_iter() {
         let tag = b"<img src=\"test.jpg\" alt=\"hello\" />";
         let attrs: Vec<_> = AttributeIter::new(tag).collect();
@@ -960,12 +931,12 @@ mod tests {
         use bstr::ByteSlice;
 
         let html = b"<a id=\"tp\"/>";
-        let mut aid_counter = 0usize;
+        let mut aid_counter = 0u32;
         let mut id_map = HashMap::new();
         let result = add_aid_attributes_fast(html, "test.html", &mut aid_counter, &mut id_map);
         let result_str = String::from_utf8_lossy(&result.html);
 
-        // Should produce <a id="tp" aid="0"/> not <a id="tp"/ aid="0"/>
+        // Should produce <a id="tp" aid="0000"/> not <a id="tp"/ aid="0000"/>
         assert!(
             result_str.contains("id=\"tp\" aid="),
             "aid should come after id, not after /: {result_str}"

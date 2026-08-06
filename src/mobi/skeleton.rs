@@ -196,6 +196,7 @@ pub struct ChunkerResult {
 
 /// Chunker - breaks HTML files into skeletons and chunks
 pub struct Chunker {
+    aid_counter: u32,
     /// Mapping of (file, id) -> aid built during processing
     id_map: HashMap<(String, String), String>,
     /// Mapping of file_href -> [(original_position, aid)] for filepos resolution
@@ -205,6 +206,7 @@ pub struct Chunker {
 impl Chunker {
     pub fn new() -> Self {
         Self {
+            aid_counter: 0,
             id_map: HashMap::new(),
             filepos_map: HashMap::new(),
         }
@@ -294,18 +296,13 @@ impl Chunker {
             let offset = search_pos + rel_pos;
             let val_start = offset + 6; // len(" aid=\"") is 6
 
-            if val_start < text.len()
-                && let Some(val_len) = memchr::memchr(b'"', &text[val_start..])
-            {
-                let aid_bytes = &text[val_start..val_start + val_len];
-                // Calibre emits variable-width base32 AIDs. Accept only the
-                // same ASCII identifier alphabet so a malformed attribute
-                // cannot consume arbitrary markup up to a later quote.
-                if !aid_bytes.is_empty()
-                    && aid_bytes
-                        .iter()
-                        .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
-                {
+            // Validate we have enough bytes for 4-char ID + quote
+            if val_start + 5 <= text.len() {
+                // Extract 4-byte aid
+                let aid_bytes = &text[val_start..val_start + 4];
+                let quote = text[val_start + 4];
+
+                if quote == b'"' {
                     let aid = String::from_utf8_lossy(aid_bytes).to_string();
 
                     // `offset` is in reassembled coordinates. Find the chunk
@@ -372,14 +369,10 @@ impl Chunker {
         // (`xmlns:epub`, `epub:type`, `epub:prefix`, `xml:lang`, etc.) so
         // strip them before aid annotation.
         let cleaned = super::writer_transform::strip_xml_namespaces(html);
-        // Match calibre/KindleGen's spine-scoped AID namespaces instead of
-        // merely assigning one continuous sequence across the whole book.
-        // Their million-wide ranges begin `0`, `UGI0`, `1T140`, ... .
-        let mut aid_counter = file_number * 1_000_000;
         let result = super::writer_transform::add_aid_attributes_fast(
             &cleaned,
             file_href,
-            &mut aid_counter,
+            &mut self.aid_counter,
             &mut self.id_map,
         );
 
@@ -408,7 +401,7 @@ impl Chunker {
         // renderer uses chunk selectors to map a chunk's content back to
         // its enclosing DOM element; without per-file uniqueness it
         // conflates positions across files when laying out and locks up.
-        let body_aid = extract_body_aid(skel_prefix).unwrap_or_else(|| "0".to_string());
+        let body_aid = extract_body_aid(skel_prefix).unwrap_or_else(|| "0000".to_string());
         let selector = format!("P-//*[@aid='{body_aid}']");
 
         // Each chunk's `insert_pos` is the absolute rawML position where its
@@ -460,17 +453,19 @@ fn extract_body_aid(skel_prefix: &[u8]) -> Option<String> {
     )
 }
 
-/// Split body-content bytes into chunks of at most ~`max_size` bytes each,
-/// always cutting at HTML element boundaries (after a closing tag).
+/// Split body-content bytes into chunks no larger than `max_size`, cutting
+/// between top-level body children.
 ///
-/// We walk the bytes looking for tag boundaries. After each closing tag or
-/// self-closing tag we're at a safe boundary, so we cut at the first such
-/// boundary once the in-progress chunk has reached `max_size` (first-fit).
+/// Calibre first serializes each body child, then merges adjacent children
+/// only while the result remains within its 8192-byte KF8 chunk limit. The
+/// previous implementation did the inverse: it waited until a chunk was
+/// already over the limit and cut at the *next* closing tag. Real books then
+/// produced 8.3--9.5 KiB chunks even though every individual paragraph was
+/// small enough, which real Kindle firmware does not navigate reliably.
 ///
-/// Comments, processing instructions, CDATA, and doctypes are skipped over.
-/// A single element larger than `max_size` becomes one oversized chunk
-/// (rare; would need to recurse inside it to split further, which we don't
-/// here).
+/// A single top-level element larger than `max_size` is kept intact. Matching
+/// Calibre perfectly in that uncommon case requires recursively skeletonizing
+/// that element; keeping it whole is safer than cutting through its markup.
 fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
     if body.is_empty() {
         return vec![Vec::new()];
@@ -478,6 +473,8 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
 
     let mut chunks = Vec::new();
     let mut chunk_start = 0;
+    let mut previous_boundary = 0;
+    let mut depth = 0usize;
     let mut i = 0;
 
     while i < body.len() {
@@ -521,16 +518,46 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
 
         let self_closing = j > 0 && body[j - 1] == b'/';
 
+        let mut name_start = tag_start + 1 + usize::from(is_close);
+        while name_start < j && body[name_start].is_ascii_whitespace() {
+            name_start += 1;
+        }
+        let mut name_end = name_start;
+        while name_end < j
+            && !body[name_end].is_ascii_whitespace()
+            && !matches!(body[name_end], b'/' | b'>')
+        {
+            name_end += 1;
+        }
+        let tag_name = &body[name_start..name_end];
+        let is_void = HTML_VOID_TAGS
+            .iter()
+            .any(|name| tag_name.eq_ignore_ascii_case(name.as_bytes()));
+
         i = tag_end;
 
-        // Cut at the first element-closing boundary once we've reached the
-        // target size — first-fit rather than "prefer shallowest". A deep
-        // run that doesn't surface within target shouldn't be allowed to
-        // grow past the limit, which is exactly what Kindle's renderer
-        // can't handle.
-        if (is_close || self_closing) && (i - chunk_start) >= max_size {
-            chunks.push(body[chunk_start..i].to_vec());
-            chunk_start = i;
+        let top_level_boundary = if is_close {
+            depth = depth.saturating_sub(1);
+            depth == 0
+        } else if self_closing || is_void {
+            depth == 0
+        } else {
+            depth += 1;
+            false
+        };
+
+        if top_level_boundary {
+            if i - chunk_start > max_size {
+                let cut = if previous_boundary > chunk_start {
+                    previous_boundary
+                } else {
+                    // This one top-level element is itself oversized.
+                    i
+                };
+                chunks.push(body[chunk_start..cut].to_vec());
+                chunk_start = cut;
+            }
+            previous_boundary = i;
         }
     }
 
@@ -552,6 +579,11 @@ fn split_body_into_chunks(body: &[u8], max_size: usize) -> Vec<Vec<u8>> {
 
     chunks
 }
+
+const HTML_VOID_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
 
 /// Split an HTML document into `(scaffold_before_body_content, body_content,
 /// scaffold_after_body_content)`. The split point is just past the `<body…>`
@@ -636,13 +668,16 @@ mod tests {
     fn test_add_aids() {
         use crate::mobi::writer_transform::add_aid_attributes_fast;
         let mut chunker = Chunker::new();
-        let mut aid_counter = 0usize;
         let html = b"<html><body><p>Hello</p><div>World</div></body></html>";
-        let result =
-            add_aid_attributes_fast(html, "test.xhtml", &mut aid_counter, &mut chunker.id_map);
+        let result = add_aid_attributes_fast(
+            html,
+            "test.xhtml",
+            &mut chunker.aid_counter,
+            &mut chunker.id_map,
+        );
         let result_str = String::from_utf8_lossy(&result.html);
-        assert!(result_str.contains("aid=\"0\""));
-        assert!(result_str.contains("aid=\"1\""));
+        assert!(result_str.contains("aid=\"0000\""));
+        assert!(result_str.contains("aid=\"0001\""));
     }
 }
 
@@ -670,6 +705,29 @@ mod chunker_tests {
         let chunks = split_body_into_chunks(&body, 8192);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].as_slice(), body.as_slice());
+    }
+
+    #[test]
+    fn chunker_cuts_before_adding_a_child_that_would_exceed_target() {
+        let paragraph = |ch: u8, size: usize| {
+            let mut raw = b"<p>".to_vec();
+            raw.extend(std::iter::repeat_n(ch, size));
+            raw.extend_from_slice(b"</p>");
+            raw
+        };
+        let children = [
+            paragraph(b'A', 3_900),
+            paragraph(b'B', 3_900),
+            paragraph(b'C', 1_000),
+        ];
+        let body: Vec<u8> = children.iter().flatten().copied().collect();
+        let chunks = split_body_into_chunks(&body, CHUNK_SIZE);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= CHUNK_SIZE));
+        assert_eq!(chunks.concat(), body);
+        assert!(chunks[0].ends_with(b"</p>"));
+        assert!(chunks[1].starts_with(b"<p>"));
     }
 
     #[test]
@@ -787,24 +845,5 @@ mod chunker_tests {
              got {:?}",
             all_selectors,
         );
-
-        assert_eq!(
-            result.chunk_table[0].selector, "P-//*[@aid='0']",
-            "the first spine document must use calibre's unpadded AID base",
-        );
-        let file_one = result
-            .chunk_table
-            .iter()
-            .find(|c| c.file_number == 1)
-            .unwrap();
-        assert_eq!(file_one.selector, "P-//*[@aid='UGI0']");
-        let file_two = result
-            .chunk_table
-            .iter()
-            .find(|c| c.file_number == 2)
-            .unwrap();
-        assert_eq!(file_two.selector, "P-//*[@aid='1T140']");
-        assert!(result.aid_offset_map.contains_key("UGI0"));
-        assert!(result.aid_offset_map.contains_key("1T140"));
     }
 }
